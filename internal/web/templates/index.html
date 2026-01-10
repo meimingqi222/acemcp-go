@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acemcp-Go Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div x-data="mcpManager()" x-init="init()" class="container mx-auto p-6">
+        <header class="bg-white shadow rounded-lg p-6 mb-6 flex justify-between items-center">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-800" x-text="t('title')"></h1>
+                <p class="text-gray-600 mt-2" x-text="t('subtitle')"></p>
+            </div>
+            <div class="flex gap-2">
+                <button @click="setLanguage('en')" :class="lang === 'en' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded text-sm">
+                    English
+                </button>
+                <button @click="setLanguage('zh')" :class="lang === 'zh' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded text-sm">
+                    中文
+                </button>
+            </div>
+        </header>
+
+        <!-- Status Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+            <div class="bg-white shadow rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2" x-text="t('status')"></h3>
+                <p class="text-2xl font-bold" :class="status.status === 'ready' ? 'text-green-600' : status.status === 'starting' ? 'text-yellow-600' : 'text-red-600'" x-text="t('status_' + status.status)"></p>
+            </div>
+            <div class="bg-white shadow rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2" x-text="t('indexed_projects')"></h3>
+                <p class="text-2xl font-bold text-blue-600" x-text="Object.keys(projects).length"></p>
+            </div>
+            <div class="bg-white shadow rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2" x-text="t('total_blobs')"></h3>
+                <p class="text-2xl font-bold text-purple-600" x-text="totalBlobs"></p>
+            </div>
+            <div class="bg-white shadow rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2" x-text="t('watching')"></h3>
+                <p class="text-2xl font-bold text-orange-600" x-text="metrics.watch_projects || 0"></p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <!-- Configuration -->
+            <div class="bg-white shadow rounded-lg p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold text-gray-800" x-text="t('configuration')"></h2>
+                    <button @click="refreshData()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm">
+                        ↻ <span x-text="t('refresh')"></span>
+                    </button>
+                </div>
+                <div class="space-y-3 text-sm">
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('listen_addr')"></span>
+                        <span class="text-gray-600" x-text="config.listen"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('http_addr')"></span>
+                        <span class="text-gray-600" x-text="config.http"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('data_dir')"></span>
+                        <span class="text-gray-600 truncate max-w-xs" x-text="config.data"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('base_url')"></span>
+                        <span class="text-gray-600 truncate max-w-xs" x-text="config.base"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('batch_size')"></span>
+                        <span class="text-gray-600" x-text="config.batch"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('max_lines')"></span>
+                        <span class="text-gray-600" x-text="config.maxln"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="font-medium text-gray-700" x-text="t('version')"></span>
+                        <span class="text-gray-600" x-text="config.ver"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Metrics -->
+            <div class="bg-white shadow rounded-lg p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4" x-text="t('metrics')"></h2>
+                <div class="space-y-3 text-sm">
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('index_runs')"></span>
+                        <span class="text-gray-600" x-text="metrics.index_runs || 0"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('search_runs')"></span>
+                        <span class="text-gray-600" x-text="metrics.search_runs || 0"></span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="font-medium text-gray-700" x-text="t('last_index')"></span>
+                        <span class="text-gray-600" x-text="formatTime(metrics.last_index_time)"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="font-medium text-gray-700" x-text="t('last_search')"></span>
+                        <span class="text-gray-600" x-text="formatTime(metrics.last_search_time)"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Projects List -->
+        <div class="bg-white shadow rounded-lg p-6 mb-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4" x-text="t('projects')"></h2>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" x-text="t('project_path')"></th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" x-text="t('blob_count')"></th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" x-text="t('failed_count')"></th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        <template x-for="[path, count] in Object.entries(projects)" :key="path">
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900" x-text="path"></td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600" x-text="count"></td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm" :class="(failed[path]?.length || 0) > 0 ? 'text-red-600' : 'text-green-600'" x-text="failed[path]?.length || 0"></td>
+                            </tr>
+                        </template>
+                        <template x-if="Object.keys(projects).length === 0">
+                            <tr>
+                                <td colspan="3" class="px-6 py-4 text-center text-gray-500" x-text="t('no_projects')"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Failed Blobs -->
+        <div x-show="Object.keys(failed).length > 0" class="bg-white shadow rounded-lg p-6">
+            <h2 class="text-xl font-bold text-red-600 mb-4" x-text="t('failed_blobs')"></h2>
+            <div class="space-y-4">
+                <template x-for="[project, blobs] in Object.entries(failed)" :key="project">
+                    <div x-show="blobs.length > 0" class="border rounded p-4">
+                        <h3 class="font-semibold text-gray-800 mb-2" x-text="project"></h3>
+                        <div class="space-y-2">
+                            <template x-for="blob in blobs.slice(0, 5)" :key="blob.blob_hash">
+                                <div class="text-sm bg-red-50 p-2 rounded">
+                                    <span class="font-mono text-gray-700" x-text="blob.path"></span>
+                                    <span class="text-red-600 ml-2" x-text="blob.error"></span>
+                                </div>
+                            </template>
+                            <div x-show="blobs.length > 5" class="text-sm text-gray-500" x-text="'... and ' + (blobs.length - 5) + ' more'"></div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const translations = {
+            en: {
+                title: 'Acemcp-Go Management',
+                subtitle: 'Go Implementation of Code Indexing MCP Server',
+                status: 'Status',
+                status_ready: 'Ready',
+                status_starting: 'Starting',
+                status_stopping: 'Stopping',
+                indexed_projects: 'Indexed Projects',
+                total_blobs: 'Total Blobs',
+                watching: 'Watching',
+                configuration: 'Configuration',
+                refresh: 'Refresh',
+                listen_addr: 'RPC Listen',
+                http_addr: 'HTTP Address',
+                data_dir: 'Data Directory',
+                base_url: 'Base URL',
+                batch_size: 'Batch Size',
+                max_lines: 'Max Lines/Blob',
+                version: 'Version',
+                metrics: 'Metrics',
+                index_runs: 'Index Runs',
+                search_runs: 'Search Runs',
+                last_index: 'Last Index',
+                last_search: 'Last Search',
+                projects: 'Indexed Projects',
+                project_path: 'Project Path',
+                blob_count: 'Blob Count',
+                failed_count: 'Failed',
+                no_projects: 'No projects indexed yet',
+                failed_blobs: 'Failed Blobs',
+                never: 'Never'
+            },
+            zh: {
+                title: 'Acemcp-Go 管理',
+                subtitle: 'Go 语言实现的代码索引 MCP 服务器',
+                status: '状态',
+                status_ready: '就绪',
+                status_starting: '启动中',
+                status_stopping: '停止中',
+                indexed_projects: '已索引项目',
+                total_blobs: '总代码块',
+                watching: '监视中',
+                configuration: '配置',
+                refresh: '刷新',
+                listen_addr: 'RPC 监听',
+                http_addr: 'HTTP 地址',
+                data_dir: '数据目录',
+                base_url: '基础 URL',
+                batch_size: '批量大小',
+                max_lines: '最大行数/块',
+                version: '版本',
+                metrics: '指标',
+                index_runs: '索引次数',
+                search_runs: '搜索次数',
+                last_index: '最后索引',
+                last_search: '最后搜索',
+                projects: '已索引项目',
+                project_path: '项目路径',
+                blob_count: '代码块数',
+                failed_count: '失败数',
+                no_projects: '暂无已索引项目',
+                failed_blobs: '失败的代码块',
+                never: '从未'
+            }
+        };
+
+        function mcpManager() {
+            return {
+                lang: localStorage.getItem('lang') || 'zh',
+                status: { status: 'starting' },
+                config: {},
+                projects: {},
+                failed: {},
+                metrics: {},
+                totalBlobs: 0,
+                refreshInterval: null,
+
+                t(key) {
+                    return translations[this.lang][key] || key;
+                },
+
+                setLanguage(lang) {
+                    this.lang = lang;
+                    localStorage.setItem('lang', lang);
+                },
+
+                async init() {
+                    await this.refreshData();
+                    this.refreshInterval = setInterval(() => this.refreshData(), 10000);
+                },
+
+                async refreshData() {
+                    await Promise.all([
+                        this.loadStatus(),
+                        this.loadProjects(),
+                        this.loadFailed(),
+                        this.loadMetrics()
+                    ]);
+                },
+
+                async loadStatus() {
+                    try {
+                        const response = await fetch('/status');
+                        const data = await response.json();
+                        this.status = { status: data.status };
+                        this.config = data.data || {};
+                    } catch (e) {
+                        console.error('Failed to load status:', e);
+                    }
+                },
+
+                async loadProjects() {
+                    try {
+                        const response = await fetch('/projects');
+                        this.projects = await response.json();
+                        this.totalBlobs = Object.values(this.projects).reduce((a, b) => a + b, 0);
+                    } catch (e) {
+                        console.error('Failed to load projects:', e);
+                    }
+                },
+
+                async loadFailed() {
+                    try {
+                        const response = await fetch('/failed');
+                        this.failed = await response.json();
+                    } catch (e) {
+                        console.error('Failed to load failed:', e);
+                    }
+                },
+
+                async loadMetrics() {
+                    try {
+                        const response = await fetch('/metrics');
+                        this.metrics = await response.json();
+                    } catch (e) {
+                        console.error('Failed to load metrics:', e);
+                    }
+                },
+
+                formatTime(timeStr) {
+                    if (!timeStr || timeStr === '0001-01-01T00:00:00Z') {
+                        return this.t('never');
+                    }
+                    try {
+                        const date = new Date(timeStr);
+                        return date.toLocaleString();
+                    } catch (e) {
+                        return timeStr;
+                    }
+                }
+            };
+        }
+    </script>
+</body>
+</html>

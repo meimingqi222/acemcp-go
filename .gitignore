@@ -1,0 +1,84 @@
+# Go build
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build output
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Vendor
+vendor/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Data directories (may contain sensitive data)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuration files (may contain secrets)
+settings.toml
+*.toml
+*.yaml
+*.yml
+!docker-compose.yml
+!.github/workflows/*.yml
+
+# Test coverage
+coverage.out
+coverage.html
+*.cover
+
+# Dependency directories
+node_modules/
+
+# Cache
+.cache/
+*.cache
+
+# Backup files
+*.bak
+*.backup
+
+# Local development
+.local/
+local/
+
+# Package files
+*.tar.gz
+*.zip
+*.rar
+
+# Runtime
+*.pid
+*.lock
