@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yourorg/acemcp-go/internal/config"
-	"github.com/yourorg/acemcp-go/internal/indexer"
-	"github.com/yourorg/acemcp-go/internal/logging"
-	"github.com/yourorg/acemcp-go/internal/state"
-	"github.com/yourorg/acemcp-go/internal/version"
+	"github.com/meimingqi222/acemcp-go/internal/config"
+	"github.com/meimingqi222/acemcp-go/internal/indexer"
+	"github.com/meimingqi222/acemcp-go/internal/logging"
+	"github.com/meimingqi222/acemcp-go/internal/state"
+	"github.com/meimingqi222/acemcp-go/internal/version"
 )
 
 //go:embed templates/index.html

@@ -31,10 +31,11 @@ func NewLogger(level string) (*Logger, error) {
 }
 
 // Helper field constructors to avoid direct zap import at call sites.
-func String(key, val string) zap.Field  { return zap.String(key, val) }
-func Error(err error) zap.Field         { return zap.Error(err) }
-func Int(key string, val int) zap.Field { return zap.Int(key, val) }
-func Any(key string, val any) zap.Field { return zap.Any(key, val) }
+func String(key, val string) zap.Field    { return zap.String(key, val) }
+func Error(err error) zap.Field           { return zap.Error(err) }
+func Int(key string, val int) zap.Field   { return zap.Int(key, val) }
+func Int64(key string, val int64) zap.Field { return zap.Int64(key, val) }
+func Any(key string, val any) zap.Field   { return zap.Any(key, val) }
 
 // Convenience wrappers for common levels.
 func (l *Logger) Debug(msg string, fields ...zap.Field) { l.Logger.Debug(msg, fields...) }

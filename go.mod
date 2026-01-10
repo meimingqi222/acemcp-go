@@ -1,4 +1,4 @@
-module github.com/yourorg/acemcp-go
+module github.com/meimingqi222/acemcp-go
 
 go 1.22
 

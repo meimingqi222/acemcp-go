@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/acemcp-go/internal/logging"
-	"github.com/yourorg/acemcp-go/internal/version"
+	"github.com/meimingqi222/acemcp-go/internal/logging"
+	"github.com/meimingqi222/acemcp-go/internal/version"
 )
 
 type rpcRequest struct {

@@ -20,8 +20,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	gitignore "github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/yourorg/acemcp-go/internal/config"
-	"github.com/yourorg/acemcp-go/internal/logging"
+	"github.com/meimingqi222/acemcp-go/internal/config"
+	"github.com/meimingqi222/acemcp-go/internal/logging"
 )
 
 type blob struct {
@@ -554,6 +554,93 @@ func (s *Service) getFailedHashes(projectPath string) map[string]struct{} {
 	return set
 }
 
+type findMissingResult struct {
+	UnknownBlobNames    []string `json:"unknown_memory_names"`
+	NonindexedBlobNames []string `json:"nonindexed_blob_names"`
+}
+
+func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
+	payload := map[string]any{
+		"mem_object_names": blobNames,
+	}
+	body, _ := json.Marshal(payload)
+	u, err := url.Parse(strings.TrimRight(s.cfg.BaseURL, "/") + "/find-missing")
+	if err != nil {
+		return nil, fmt.Errorf("invalid base_url: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("find-missing failed: %s", string(b))
+	}
+	var res findMissingResult
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool {
+	if len(blobNames) == 0 {
+		return true
+	}
+
+	maxWait := 60 * time.Second
+	pollInterval := 3 * time.Second
+	elapsed := time.Duration(0)
+	lastNonindexed := -1
+	stableCount := 0
+
+	s.opLog.Infof(OpSearch, normRoot, "waiting for %d blobs to be indexed", len(blobNames))
+
+	for elapsed < maxWait {
+		time.Sleep(pollInterval)
+		elapsed += pollInterval
+
+		res, err := s.findMissing(blobNames)
+		if err != nil {
+			s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			continue
+		}
+
+		nonindexed := len(res.NonindexedBlobNames)
+		unknown := len(res.UnknownBlobNames)
+
+		if nonindexed == 0 && unknown == 0 {
+			s.opLog.Infof(OpSearch, normRoot, "all blobs indexed after %v", elapsed)
+			return true
+		}
+
+		s.opLog.Infof(OpSearch, normRoot, "waiting for index: %d nonindexed, %d unknown (%v elapsed)", nonindexed, unknown, elapsed)
+
+		if nonindexed == lastNonindexed {
+			stableCount++
+			if stableCount >= 3 && nonindexed <= len(blobNames)/10 {
+				s.opLog.Infof(OpSearch, normRoot, "index mostly complete: %d/%d blobs still processing, proceeding", nonindexed, len(blobNames))
+				return true
+			}
+		} else {
+			stableCount = 0
+			lastNonindexed = nonindexed
+		}
+	}
+
+	s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for blobs to be indexed after %v", maxWait)
+	return false
+}
+
 func (s *Service) uploadBlobs(blobs []blob) ([]string, error) {
 	payload := map[string]any{
 		"blobs": blobs,
@@ -617,13 +704,19 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	s.lastIndexTime = time.Now()
 	s.metricsMu.Unlock()
 
+	s.opLog.Infof(OpCollect, normRoot, "starting file collection")
+
 	blobs, err := s.collectBlobsWithHash(projectRoot)
 	if err != nil {
+		s.opLog.Errorf(OpCollect, normRoot, "collect failed: %v", err)
 		return nil, err
 	}
 	if len(blobs) == 0 {
+		s.opLog.Warn(OpCollect, normRoot, "no text files found", "")
 		return &IndexResult{Status: "error", Message: "no text files found"}, nil
 	}
+
+	s.opLog.Infof(OpCollect, normRoot, "collected %d blobs from %d files", len(blobs), len(blobs))
 	projects, err := s.loadProjects()
 	if err != nil {
 		return nil, err
@@ -675,7 +768,15 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 		blobsToUpload = append(blobsToUpload, b)
 	}
 
+	s.opLog.Infof(OpUpload, normRoot, "uploading %d new blobs (existing: %d)", len(blobsToUpload), len(existing))
+
 	uploaded := s.uploadBlobsConcurrent(normRoot, blobsToUpload)
+
+	if len(blobsToUpload) > 0 && len(uploaded) < len(blobsToUpload) {
+		s.opLog.Warnf(OpUpload, normRoot, "partial upload: %d/%d succeeded", len(uploaded), len(blobsToUpload))
+	} else if len(uploaded) > 0 {
+		s.opLog.Infof(OpUpload, normRoot, "uploaded %d blobs successfully", len(uploaded))
+	}
 
 	newProject := make([]string, 0, len(existing)+len(uploaded))
 	for h := range existing {
@@ -696,6 +797,14 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	s.opLog.Log(OpIndex, normRoot,
 		fmt.Sprintf("indexed %d blobs (new %d)", len(projects[normRoot]), len(uploaded)),
 		duration, true, "")
+
+	s.logger.Info("index completed",
+		logging.String("project", normRoot),
+		logging.Int("total_blobs", len(projects[normRoot])),
+		logging.Int("new_blobs", len(uploaded)),
+		logging.Int("collected", len(blobs)),
+		logging.Int64("duration_ms", duration.Milliseconds()),
+	)
 
 	return &IndexResult{
 		Status:     "success",
@@ -773,15 +882,31 @@ func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResul
 		return uploadResult{hashes: hashes}
 	}
 
+	s.opLog.Warnf(OpUpload, normRoot, "batch upload failed (%d blobs): %v", len(batch), err)
+	s.logger.Warn("batch upload failed, trying individual uploads",
+		logging.Error(err),
+		logging.Int("batch_size", len(batch)),
+	)
+
 	var uploaded []string
+	var failedCount int
 	for i, b := range batch {
 		_, berr := s.uploadBlobs([]blob{b.blob})
 		if berr != nil {
+			failedCount++
+			s.opLog.Error(OpUpload, normRoot, fmt.Sprintf("upload failed: %s", b.Path), berr.Error())
+			s.logger.Warn("individual blob upload failed",
+				logging.String("path", b.Path),
+				logging.Error(berr),
+			)
 			s.addFailed(normRoot, b.Hash, b.Path, berr.Error())
 			continue
 		}
 		uploaded = append(uploaded, hashes[i])
 		s.removeFailed(normRoot, []string{hashes[i]})
+	}
+	if failedCount > 0 {
+		s.opLog.Warnf(OpUpload, normRoot, "batch retry: %d succeeded, %d failed", len(uploaded), failedCount)
 	}
 	return uploadResult{hashes: uploaded}
 }
@@ -1010,6 +1135,8 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	return nil
 }
 
+// initialIndexDelay is removed - we now use find-missing API to poll for index readiness
+
 // SearchContext ensures indexing, then performs search via remote API.
 func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error) {
 	startTime := time.Now()
@@ -1023,19 +1150,25 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	s.metricsMu.Unlock()
 
 	normRoot := s.normalizePath(projectRoot)
+	s.opLog.Infof(OpSearch, normRoot, "search started: %s", truncateQuery(query, 80))
 	s.StartWatching(projectRoot)
 
 	s.opMu.Lock()
 	projects, err := s.loadProjects()
 	s.opMu.Unlock()
 	if err != nil {
+		s.opLog.Errorf(OpSearch, normRoot, "load projects failed: %v", err)
 		return nil, err
 	}
 	indexStart := time.Now()
+	justIndexed := false
 	if len(projects[normRoot]) == 0 {
+		s.opLog.Info(OpSearch, normRoot, "project not indexed, starting initial index")
 		if _, err := s.IndexProject(projectRoot); err != nil {
+			s.opLog.Errorf(OpSearch, normRoot, "initial index failed: %v", err)
 			return nil, err
 		}
+		justIndexed = true
 	} else {
 		s.flushPendingChanges(normRoot)
 	}
@@ -1049,6 +1182,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	}
 	blobNames := projects[normRoot]
 	if len(blobNames) == 0 {
+		s.opLog.Error(OpSearch, normRoot, "no blobs found after indexing", "")
 		return nil, fmt.Errorf("no blobs found for project")
 	}
 	failedSet := s.getFailedHashes(normRoot)
@@ -1061,9 +1195,18 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 			filtered = append(filtered, h)
 		}
 		blobNames = filtered
+		s.opLog.Infof(OpSearch, normRoot, "filtered out %d failed blobs, %d remaining", len(failedSet), len(blobNames))
 	}
 	if len(blobNames) == 0 {
+		s.opLog.Error(OpSearch, normRoot, "no valid blobs available (all failed)", "")
 		return nil, fmt.Errorf("no valid blobs available for search")
+	}
+
+	s.opLog.Infof(OpSearch, normRoot, "calling search API with %d blobs", len(blobNames))
+
+	// Wait for remote index to be ready after initial indexing using find-missing API
+	if justIndexed {
+		s.waitForBlobsIndexed(normRoot, blobNames)
 	}
 
 	payload := map[string]any{
@@ -1078,51 +1221,84 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		"disable_codebase_retrieval": false,
 		"enable_commit_retrieval":    false,
 	}
-	body, _ := json.Marshal(payload)
-	u, err := url.Parse(strings.TrimRight(s.cfg.BaseURL, "/") + "/agents/codebase-retrieval")
-	if err != nil {
-		return nil, fmt.Errorf("invalid base_url: %w", err)
-	}
-	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
-	req.Header.Set("Content-Type", "application/json")
 
-	apiStart := time.Now()
-	var resp *http.Response
-	maxRetries := 3
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		resp, err = s.client.Do(req)
-		if err == nil {
-			break
-		}
-		s.logger.Warn("search request failed, retrying",
-			logging.Error(err),
-			logging.Int("attempt", attempt+1),
-		)
-		time.Sleep(time.Duration(attempt+1) * time.Second)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("search failed: %s", string(b))
-	}
-
+	// Search with retry mechanism
 	var res struct {
 		Formatted string `json:"formatted_retrieval"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
+	maxRetries := 3
+	baseDelay := 2 * time.Second
+	var apiMs int64
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		body, _ := json.Marshal(payload)
+		u, err := url.Parse(strings.TrimRight(s.cfg.BaseURL, "/") + "/agents/codebase-retrieval")
+		if err != nil {
+			return nil, fmt.Errorf("invalid base_url: %w", err)
+		}
+		req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+		req.Header.Set("Content-Type", "application/json")
+
+		apiStart := time.Now()
+		resp, err := s.client.Do(req)
+		if err != nil {
+			s.logger.Warn("search request failed, retrying",
+				logging.Error(err),
+				logging.Int("attempt", attempt+1),
+			)
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(attempt+1)
+				s.opLog.Warnf(OpSearch, normRoot, "search request failed, retrying in %v (attempt %d/%d)", delay, attempt+1, maxRetries)
+				time.Sleep(delay)
+			}
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(resp.Body)
+			s.opLog.Error(OpSearch, normRoot, fmt.Sprintf("search API error (HTTP %d)", resp.StatusCode), string(b))
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(attempt+1)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("search failed: %s", string(b))
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			s.opLog.Errorf(OpSearch, normRoot, "decode response failed: %v", err)
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(attempt+1)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, err
+		}
+		apiMs = time.Since(apiStart).Milliseconds()
+
+		// Check if result is empty (index may still be building)
+		if res.Formatted == "" || len(res.Formatted) < 10 {
+			s.opLog.Warnf(OpSearch, normRoot, "search returned empty/short result (len=%d), retrying (attempt %d/%d)", len(res.Formatted), attempt+1, maxRetries)
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(attempt+1)
+				time.Sleep(delay)
+				continue
+			}
+			res.Formatted = "No relevant code context found."
+			break
+		}
+		break
 	}
-	apiMs := time.Since(apiStart).Milliseconds()
-	if res.Formatted == "" {
-		res.Formatted = "No relevant code context found."
+
+	resultLen := len(res.Formatted)
+	if res.Formatted == "No relevant code context found." {
+		s.opLog.Warn(OpSearch, normRoot, "search returned empty result", "API returned no matching code")
+	} else {
+		s.opLog.Infof(OpSearch, normRoot, "search completed, result length: %d chars", resultLen)
 	}
 
 	duration := time.Since(startTime)

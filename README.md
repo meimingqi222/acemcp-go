@@ -318,7 +318,7 @@ go build -o dist/acemcp-go-mcp ./cmd/mcp
 
 - [MCP 协议规范](https://modelcontextprotocol.io/)
 - [Go 语言官网](https://golang.org/)
-- [项目问题反馈](https://github.com/yourorg/acemcp-go/issues)
+- [项目问题反馈](https://github.com/meimingqi222/acemcp-go/issues)
 
 ## 🚀 CI/CD
 
