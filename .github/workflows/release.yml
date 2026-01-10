@@ -117,7 +117,7 @@ jobs:
     - name: Prepare release assets
       run: |
         mkdir -p release
-        find artifacts -name "*.exe" -o -name "*-linux-*" -o -name "*-darwin-*" | while read file; do
+        find artifacts -type f \( -name "*.exe" -o -name "*-linux-*" -o -name "*-darwin-*" \) | while read file; do
           cp "$file" release/
         done
         cd release
