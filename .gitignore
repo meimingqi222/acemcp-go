@@ -82,3 +82,7 @@ local/
 # Runtime
 *.pid
 *.lock
+
+# Release notes (temporary files)
+RELEASE_NOTES.md
+RELEASE_*.md
