@@ -1,12 +1,12 @@
-# acemcp-go PowerShell 安装器
-# 用法: powershell -c "iwr -useb https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.ps1 | iex"
+# acemcp-go PowerShell installer
+# Usage: powershell -c "iwr -useb https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.ps1 | iex"
 
 param(
     [string]$Version = "latest",
     [string]$InstallDir = "$env:USERPROFILE\.acemcp"
 )
 
-# 颜色输出
+# Color output
 function Write-ColorOutput {
     param(
         [string]$Message,
@@ -23,7 +23,7 @@ function Write-ColorOutput {
     Write-Host $Message -ForegroundColor $colors[$Color]
 }
 
-# 检测平台
+# Detect platform
 function Get-Platform {
     $arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
     
@@ -31,25 +31,25 @@ function Get-Platform {
         "amd64" { return "windows-amd64" }
         "arm64" { return "windows-arm64" }
         default {
-            Write-ColorOutput "不支持的架构: $arch" "Red"
+            Write-ColorOutput "Unsupported architecture: $arch" "Red"
             exit 1
         }
     }
 }
 
-# 获取最新版本
+# Get latest version
 function Get-LatestVersion {
     try {
         $response = Invoke-RestMethod -Uri "https://api.github.com/repos/meimingqi222/acemcp-go/releases/latest" -UseBasicParsing
         return $response.tag_name
     }
     catch {
-        Write-ColorOutput "无法获取最新版本: $_" "Red"
+        Write-ColorOutput "Unable to fetch latest version: $_" "Red"
         exit 1
     }
 }
 
-# 下载二进制文件
+# Download binaries
 function Invoke-BinaryDownload {
     param(
         [string]$Version,
@@ -59,7 +59,7 @@ function Invoke-BinaryDownload {
     $baseUrl = "https://github.com/meimingqi222/acemcp-go/releases/download/$Version"
     $binDir = Join-Path $InstallDir "bin"
     
-    Write-ColorOutput "正在下载 acemcp-go $Version for $Platform..." "Green"
+    Write-ColorOutput "Downloading acemcp-go $Version for $Platform..." "Green"
     
     # 创建目录
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -73,7 +73,7 @@ function Invoke-BinaryDownload {
         Invoke-WebRequest -Uri "$baseUrl/$daemonFile" -OutFile $daemonPath -UseBasicParsing
     }
     catch {
-        Write-ColorOutput "下载 daemon 失败: $_" "Red"
+        Write-ColorOutput "Failed to download daemon: $_" "Red"
         exit 1
     }
     
@@ -85,20 +85,21 @@ function Invoke-BinaryDownload {
         Invoke-WebRequest -Uri "$baseUrl/$mcpFile" -OutFile $mcpPath -UseBasicParsing
     }
     catch {
-        Write-ColorOutput "下载 MCP 服务器失败: $_" "Red"
+        Write-ColorOutput "Failed to download MCP server: $_" "Red"
         exit 1
     }
     
-    Write-ColorOutput "下载完成" "Green"
+    Write-ColorOutput "Download complete" "Green"
 }
 
-# 创建配置文件
+# Create configuration
 function New-ConfigFile {
     $configPath = Join-Path $InstallDir "settings.toml"
     
     if (-not (Test-Path $configPath)) {
         $configContent = @'
-# acemcp-go 配置文件
+# acemcp-go configuration
+# settings.toml
 LISTEN = "127.0.0.1:7033"
 HTTP_ADDR = "127.0.0.1:7034"
 LOG_LEVEL = "info"
@@ -111,12 +112,12 @@ EXCLUDE_PATTERNS = [".git", "node_modules", "vendor", ".venv", "venv", "__pycach
 '@
         
         $configContent | Out-File -FilePath $configPath -Encoding UTF8
-        Write-ColorOutput "配置文件已创建: $configPath" "Green"
-        Write-ColorOutput "请编辑配置文件设置您的 BASE_URL 和 TOKEN" "Yellow"
+        Write-ColorOutput "Configuration file created: $configPath" "Green"
+        Write-ColorOutput "Please edit BASE_URL and TOKEN before starting" "Yellow"
     }
 }
 
-# 添加到 PATH
+# Add to PATH
 function Add-ToPath {
     $binDir = Join-Path $InstallDir "bin"
     $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -124,12 +125,13 @@ function Add-ToPath {
     if ($currentPath -notlike "*$binDir*") {
         $newPath = $currentPath + ";" + $binDir
         [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-        Write-ColorOutput "已将 $binDir 添加到用户 PATH" "Green"
-        Write-ColorOutput "请重新启动命令提示符或 PowerShell" "Yellow"
+        Write-ColorOutput "Added $binDir to user PATH" "Green"
+        Write-ColorOutput "✅ Installation complete!" "Green"
+        Write-ColorOutput "Please restart Command Prompt or PowerShell" "Yellow"
     }
 }
 
-# 创建启动器
+# Create launcher
 function New-Launcher {
     $binDir = Join-Path $InstallDir "bin"
     $launcherPath = Join-Path $binDir "acemcp.bat"
@@ -153,7 +155,7 @@ acemcp-go-mcp.exe %*
 "@
     
     $launcherContent | Out-File -FilePath $launcherPath -Encoding ASCII
-    Write-ColorOutput "创建启动器: $launcherPath" "Green"
+    Write-ColorOutput "Launcher created: $launcherPath" "Green"
     
     # 创建 PowerShell 启动器
     $psLauncherPath = Join-Path $binDir "acemcp.ps1"
@@ -178,18 +180,18 @@ if (-not \$daemon) {
 
 # 主函数
 function Main {
-    Write-ColorOutput "🚀 acemcp-go 快速安装器" "Green"
+    Write-ColorOutput "🚀 acemcp-go quick installer" "Green"
     Write-Host ""
     
     # 检测平台
     $platform = Get-Platform
-    Write-ColorOutput "检测到平台: $platform" "Green"
+    Write-ColorOutput "Detected platform: $platform" "Green"
     
     # 获取版本
     if ($Version -eq "latest") {
         $Version = Get-LatestVersion
     }
-    Write-ColorOutput "版本: $Version" "Green"
+    Write-ColorOutput "Version: $Version" "Green"
     
     # 下载
     Invoke-BinaryDownload -Version $Version -Platform $platform
@@ -204,14 +206,14 @@ function Main {
     New-Launcher
     
     Write-Host ""
-    Write-ColorOutput "✅ 安装完成！" "Green"
+    Write-ColorOutput "✅ Installation complete!" "Green"
     Write-Host ""
-    Write-ColorOutput "下一步:" "Yellow"
-    Write-Host "1. 编辑配置文件: $InstallDir\settings.toml"
-    Write-Host "2. 重新启动命令提示符或 PowerShell"
-    Write-Host "3. 在 Cursor 中配置 MCP 服务器，使用命令: acemcp"
+    Write-ColorOutput "Next steps:" "Yellow"
+    Write-Host "1. Edit configuration: $InstallDir\settings.toml"
+    Write-Host "2. Restart Command Prompt or PowerShell"
+    Write-Host "3. Configure Cursor MCP server with command: acemcp"
     Write-Host ""
-    Write-ColorOutput "Cursor MCP 配置:" "Yellow"
+    Write-ColorOutput "Cursor MCP configuration:" "Yellow"
     Write-Host "{"
     Write-Host "  `"mcpServers`": {"
     Write-Host "    `"acemcp`": {"
@@ -221,5 +223,5 @@ function Main {
     Write-Host "}"
 }
 
-# 运行主函数
+# Run main
 Main
