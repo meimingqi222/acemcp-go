@@ -172,7 +172,9 @@
                         <span class="text-gray-500 mr-2" x-text="formatLogTime(log.time)"></span>
                         <span class="mr-2" :class="log.type === 'index' ? 'text-blue-400' : log.type === 'search' ? 'text-yellow-400' : 'text-purple-400'" x-text="'[' + log.type.toUpperCase() + ']'"></span>
                         <span class="text-green-400 mr-2" x-text="log.message"></span>
-                        <span class="text-cyan-400" x-text="log.duration_ms + 'ms'"></span>
+                        <template x-if="log.duration_ms > 0">
+                            <span class="text-cyan-400" x-text="log.duration_ms + 'ms'"></span>
+                        </template>
                         <template x-if="log.type === 'search' && (log.index_ms > 0 || log.api_ms > 0)">
                             <span class="text-gray-400 ml-2" x-text="'(index: ' + log.index_ms + 'ms, api: ' + log.api_ms + 'ms)'"></span>
                         </template>

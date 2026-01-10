@@ -975,10 +975,12 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	if projectRoot == "" {
 		return fmt.Errorf("project_root_path required")
 	}
+	startTime := time.Now()
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
 	normRoot := s.normalizePath(projectRoot)
+	s.opLog.Infof(OpApply, normRoot, "applying changes: %d upserts, %d deletes", len(upserts), len(deletes))
 	projects, err := s.loadProjects()
 	if err != nil {
 		return err
@@ -1132,6 +1134,8 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	if err := s.saveProjects(projects); err != nil {
 		return err
 	}
+	duration := time.Since(startTime)
+	s.opLog.Log(OpApply, normRoot, fmt.Sprintf("changes applied: %d upserts, %d deletes", len(upserts), len(deletes)), duration, true, "")
 	return nil
 }
 
