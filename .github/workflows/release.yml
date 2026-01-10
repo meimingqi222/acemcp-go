@@ -183,6 +183,5 @@ jobs:
           release/*
         draft: false
         prerelease: false
-        update_existing_release: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
