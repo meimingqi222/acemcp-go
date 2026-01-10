@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,11 @@ import (
 type blob struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+}
+
+type blobWithHash struct {
+	blob
+	Hash string
 }
 
 func (s *Service) removeFailed(projectPath string, hashes []string) {
@@ -143,6 +149,15 @@ type Service struct {
 	debounceTimers map[string]*time.Timer
 	pending        map[string]*pendingChanges
 	gitignores     map[string]*gitignoreEntry // per-project gitignore
+	allowedExts    map[string]struct{}        // precompiled extension set
+
+	cacheMu      sync.RWMutex
+	projects     map[string][]string         // in-memory cache
+	filesIdx     filesIndex                  // in-memory cache
+	failed       map[string][]failedBlob     // in-memory cache
+	cacheLoaded  bool
+	cacheDirty   bool
+	flushTimer   *time.Timer
 
 	metricsMu      sync.Mutex
 	indexRuns      int
@@ -153,6 +168,10 @@ type Service struct {
 
 func New(cfg *config.Config, logger *logging.Logger) *Service {
 	_ = os.MkdirAll(cfg.DataDir, 0o755)
+	allowedExts := make(map[string]struct{}, len(cfg.TextExtensions))
+	for _, e := range cfg.TextExtensions {
+		allowedExts[strings.ToLower(e)] = struct{}{}
+	}
 	return &Service{
 		logger:         logger,
 		cfg:            cfg,
@@ -164,6 +183,10 @@ func New(cfg *config.Config, logger *logging.Logger) *Service {
 		debounceTimers: make(map[string]*time.Timer),
 		pending:        make(map[string]*pendingChanges),
 		gitignores:     make(map[string]*gitignoreEntry),
+		allowedExts:    allowedExts,
+		projects:       make(map[string][]string),
+		filesIdx:       make(filesIndex),
+		failed:         make(map[string][]failedBlob),
 		opLog:          NewOpLogger(200),
 	}
 }
@@ -213,32 +236,11 @@ func (s *Service) ListProjects() (map[string]int, error) {
 }
 
 func (s *Service) loadFilesIndex() (filesIndex, error) {
-	out := filesIndex{}
-	b, err := os.ReadFile(s.filesPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return out, nil
-		}
-		return nil, err
-	}
-	if len(b) == 0 {
-		return out, nil
-	}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return s.loadFilesIndexCached()
 }
 
 func (s *Service) saveFilesIndex(idx filesIndex) error {
-	if err := os.MkdirAll(filepath.Dir(s.filesPath), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(idx, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.filesPath, b, 0o644)
+	return s.saveFilesIndexCached(idx)
 }
 
 // ListFailed returns project -> failed blobs.
@@ -254,86 +256,130 @@ func (s *Service) normalizePath(path string) string {
 	return strings.ReplaceAll(abs, "\\", "/")
 }
 
-func (s *Service) collectBlobs(root string) ([]blob, error) {
-	var blobs []blob
+func (s *Service) isAllowedExt(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	_, ok := s.allowedExts[ext]
+	return ok
+}
+
+type fileTask struct {
+	absPath string
+	relPath string
+}
+
+func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 	maxLines := s.cfg.MaxLinesPerBlob
 	if maxLines <= 0 {
 		maxLines = 800
 	}
 
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = strings.ReplaceAll(rel, "\\", "/")
-		// Skip ignored directories early
-		if d.IsDir() {
-			if rel != "." && s.shouldSkip(root, rel, true) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if s.shouldSkip(root, rel, false) {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		allowed := false
-		for _, e := range s.cfg.TextExtensions {
-			if strings.ToLower(e) == ext {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			s.logger.Warn("read file failed", logging.String("file", rel), logging.Error(err))
-			return nil
-		}
-		content := string(data)
-		lines := strings.Split(content, "\n")
-		if len(lines) <= maxLines {
-			blobs = append(blobs, blob{
-				Path:    rel,
-				Content: content,
-			})
-			return nil
-		}
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 2 {
+		numWorkers = 2
+	}
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
 
-		// split into chunks
-		total := len(lines)
-		chunks := (total + maxLines - 1) / maxLines
-		for i := 0; i < chunks; i++ {
-			start := i * maxLines
-			end := start + maxLines
-			if end > total {
-				end = total
+	tasks := make(chan fileTask, 256)
+	results := make(chan []blobWithHash, 256)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				blobs := s.processFile(task.absPath, task.relPath, maxLines)
+				if len(blobs) > 0 {
+					results <- blobs
+				}
 			}
-			chunkContent := strings.Join(lines[start:end], "\n")
-			chunkPath := fmt.Sprintf("%s#chunk%dof%d", rel, i+1, chunks)
-			blobs = append(blobs, blob{
-				Path:    chunkPath,
-				Content: chunkContent,
-			})
-		}
-		s.logger.Info("split large file",
-			logging.String("file", rel),
-			logging.Int("lines", total),
-			logging.Int("chunks", chunks),
-			logging.Int("max_lines", maxLines),
-		)
+		}()
+	}
+
+	go func() {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return nil
+			}
+			rel = strings.ReplaceAll(rel, "\\", "/")
+			if d.IsDir() {
+				if rel != "." && s.shouldSkip(root, rel, true) {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if s.shouldSkip(root, rel, false) {
+				return nil
+			}
+			if !s.isAllowedExt(path) {
+				return nil
+			}
+			tasks <- fileTask{absPath: path, relPath: rel}
+			return nil
+		})
+		close(tasks)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var allBlobs []blobWithHash
+	for blobs := range results {
+		allBlobs = append(allBlobs, blobs...)
+	}
+
+	return allBlobs, nil
+}
+
+func (s *Service) processFile(absPath, relPath string, maxLines int) []blobWithHash {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		s.logger.Warn("read file failed", logging.String("file", relPath), logging.Error(err))
 		return nil
-	})
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	if len(lines) <= maxLines {
+		b := blob{Path: relPath, Content: content}
+		return []blobWithHash{{blob: b, Hash: hashBlob(b)}}
+	}
+
+	total := len(lines)
+	chunks := (total + maxLines - 1) / maxLines
+	result := make([]blobWithHash, 0, chunks)
+	for i := 0; i < chunks; i++ {
+		start := i * maxLines
+		end := start + maxLines
+		if end > total {
+			end = total
+		}
+		chunkContent := strings.Join(lines[start:end], "\n")
+		chunkPath := fmt.Sprintf("%s#chunk%dof%d", relPath, i+1, chunks)
+		b := blob{Path: chunkPath, Content: chunkContent}
+		result = append(result, blobWithHash{blob: b, Hash: hashBlob(b)})
+	}
+	return result
+}
+
+func (s *Service) collectBlobs(root string) ([]blob, error) {
+	blobs, err := s.collectBlobsWithHash(root)
 	if err != nil {
 		return nil, err
 	}
-	return blobs, nil
+	result := make([]blob, len(blobs))
+	for i, b := range blobs {
+		result[i] = b.blob
+	}
+	return result, nil
 }
 
 func hashBlob(b blob) string {
@@ -343,62 +389,125 @@ func hashBlob(b blob) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (s *Service) loadProjects() (map[string][]string, error) {
-	projects := map[string][]string{}
+func (s *Service) ensureCacheLoaded() error {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.cacheLoaded {
+		return nil
+	}
 	b, err := os.ReadFile(s.projectsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return projects, nil
-		}
-		return nil, err
+	if err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &s.projects)
 	}
-	if len(b) == 0 {
-		return projects, nil
+	b, err = os.ReadFile(s.filesPath)
+	if err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &s.filesIdx)
 	}
-	if err := json.Unmarshal(b, &projects); err != nil {
-		return nil, err
+	b, err = os.ReadFile(s.failedPath)
+	if err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &s.failed)
 	}
-	return projects, nil
+	s.cacheLoaded = true
+	return nil
+}
+
+func (s *Service) scheduleCacheFlush() {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.cacheDirty = true
+	if s.flushTimer != nil {
+		return
+	}
+	s.flushTimer = time.AfterFunc(2*time.Second, func() {
+		s.flushCache()
+	})
+}
+
+func (s *Service) flushCache() {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if !s.cacheDirty {
+		return
+	}
+	s.flushTimer = nil
+	_ = os.MkdirAll(filepath.Dir(s.projectsPath), 0o755)
+	if data, err := json.Marshal(s.projects); err == nil {
+		_ = os.WriteFile(s.projectsPath, data, 0o644)
+	}
+	if data, err := json.Marshal(s.filesIdx); err == nil {
+		_ = os.WriteFile(s.filesPath, data, 0o644)
+	}
+	if data, err := json.Marshal(s.failed); err == nil {
+		_ = os.WriteFile(s.failedPath, data, 0o644)
+	}
+	s.cacheDirty = false
+}
+
+func (s *Service) loadProjects() (map[string][]string, error) {
+	_ = s.ensureCacheLoaded()
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	result := make(map[string][]string, len(s.projects))
+	for k, v := range s.projects {
+		cp := make([]string, len(v))
+		copy(cp, v)
+		result[k] = cp
+	}
+	return result, nil
 }
 
 func (s *Service) saveProjects(projects map[string][]string) error {
-	if err := os.MkdirAll(filepath.Dir(s.projectsPath), 0o755); err != nil {
-		return err
+	s.cacheMu.Lock()
+	s.projects = projects
+	s.cacheMu.Unlock()
+	s.scheduleCacheFlush()
+	return nil
+}
+
+func (s *Service) loadFilesIndexCached() (filesIndex, error) {
+	_ = s.ensureCacheLoaded()
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	result := make(filesIndex, len(s.filesIdx))
+	for k, v := range s.filesIdx {
+		cp := make(map[string][]string, len(v))
+		for fk, fv := range v {
+			hcp := make([]string, len(fv))
+			copy(hcp, fv)
+			cp[fk] = hcp
+		}
+		result[k] = cp
 	}
-	data, err := json.MarshalIndent(projects, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.projectsPath, data, 0o644)
+	return result, nil
+}
+
+func (s *Service) saveFilesIndexCached(idx filesIndex) error {
+	s.cacheMu.Lock()
+	s.filesIdx = idx
+	s.cacheMu.Unlock()
+	s.scheduleCacheFlush()
+	return nil
 }
 
 func (s *Service) loadFailed() (map[string][]failedBlob, error) {
-	result := map[string][]failedBlob{}
-	b, err := os.ReadFile(s.failedPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return result, nil
-		}
-		return nil, err
-	}
-	if len(b) == 0 {
-		return result, nil
-	}
-	if err := json.Unmarshal(b, &result); err != nil {
-		return nil, err
+	_ = s.ensureCacheLoaded()
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	result := make(map[string][]failedBlob, len(s.failed))
+	for k, v := range s.failed {
+		cp := make([]failedBlob, len(v))
+		copy(cp, v)
+		result[k] = cp
 	}
 	return result, nil
 }
 
 func (s *Service) saveFailed(data map[string][]failedBlob) error {
-	if err := os.MkdirAll(filepath.Dir(s.failedPath), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.failedPath, b, 0o644)
+	s.cacheMu.Lock()
+	s.failed = data
+	s.cacheMu.Unlock()
+	s.scheduleCacheFlush()
+	return nil
 }
 
 func (s *Service) addFailed(projectPath, blobHash, blobPath, errMsg string) {
@@ -508,7 +617,7 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	s.lastIndexTime = time.Now()
 	s.metricsMu.Unlock()
 
-	blobs, err := s.collectBlobs(projectRoot)
+	blobs, err := s.collectBlobsWithHash(projectRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +628,7 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	filesIdx, err := s.loadFilesIndex()
+	filesIdx, err := s.loadFilesIndexCached()
 	if err != nil {
 		return nil, err
 	}
@@ -527,20 +636,17 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	if prevFiles == nil {
 		prevFiles = map[string][]string{}
 	}
-	// Build current file->hashes mapping and current hash set
 	currentFiles := map[string][]string{}
 	currentHashes := map[string]struct{}{}
 	for _, b := range blobs {
-		h := hashBlob(b)
 		base := b.Path
 		if i := strings.Index(base, "#chunk"); i >= 0 {
 			base = base[:i]
 		}
-		currentFiles[base] = append(currentFiles[base], h)
-		currentHashes[h] = struct{}{}
+		currentFiles[base] = append(currentFiles[base], b.Hash)
+		currentHashes[b.Hash] = struct{}{}
 	}
 
-	// Determine removed hashes based on previous snapshot
 	removed := make([]string, 0)
 	for _, hs := range prevFiles {
 		for _, h := range hs {
@@ -550,7 +656,6 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 		}
 	}
 
-	// Existing hashes (present in previous projects and still present in current snapshot)
 	existing := map[string]struct{}{}
 	for _, h := range projects[normRoot] {
 		if _, ok := currentHashes[h]; ok {
@@ -558,55 +663,20 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 		}
 	}
 
-	// Also remove deleted hashes from failed list
 	if len(removed) > 0 {
 		s.removeFailed(normRoot, removed)
 	}
 
-	var blobsToUpload []blob
-	var blobsToUploadHashes []string
+	var blobsToUpload []blobWithHash
 	for _, b := range blobs {
-		h := hashBlob(b)
-		if _, ok := existing[h]; ok {
+		if _, ok := existing[b.Hash]; ok {
 			continue
 		}
 		blobsToUpload = append(blobsToUpload, b)
-		blobsToUploadHashes = append(blobsToUploadHashes, h)
 	}
 
-	var uploaded []string
-	if len(blobsToUpload) > 0 {
-		batchSize := s.cfg.BatchSize
-		if batchSize <= 0 {
-			batchSize = 10
-		}
-		for i := 0; i < len(blobsToUpload); i += batchSize {
-			end := i + batchSize
-			if end > len(blobsToUpload) {
-				end = len(blobsToUpload)
-			}
-			// Try batch upload, fallback to per-blob on failure
-			_, err := s.uploadBlobs(blobsToUpload[i:end])
-			if err == nil {
-				uploaded = append(uploaded, blobsToUploadHashes[i:end]...)
-				// clear failed marks for successful uploads
-				s.removeFailed(normRoot, blobsToUploadHashes[i:end])
-				continue
-			}
-			// per-blob fallback
-			for j := i; j < end; j++ {
-				_, berr := s.uploadBlobs([]blob{blobsToUpload[j]})
-				if berr != nil {
-					s.addFailed(normRoot, blobsToUploadHashes[j], blobsToUpload[j].Path, berr.Error())
-					continue
-				}
-				uploaded = append(uploaded, blobsToUploadHashes[j])
-				s.removeFailed(normRoot, []string{blobsToUploadHashes[j]})
-			}
-		}
-	}
+	uploaded := s.uploadBlobsConcurrent(normRoot, blobsToUpload)
 
-	// Update project blobs: existing (still present) + newly uploaded
 	newProject := make([]string, 0, len(existing)+len(uploaded))
 	for h := range existing {
 		newProject = append(newProject, h)
@@ -614,9 +684,8 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	newProject = append(newProject, uploaded...)
 	projects[normRoot] = newProject
 
-	// persist current file snapshot
 	filesIdx[normRoot] = currentFiles
-	if err := s.saveFilesIndex(filesIdx); err != nil {
+	if err := s.saveFilesIndexCached(filesIdx); err != nil {
 		return nil, err
 	}
 	if err := s.saveProjects(projects); err != nil {
@@ -636,14 +705,89 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	}, nil
 }
 
-func (s *Service) isAllowedTextExt(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	for _, e := range s.cfg.TextExtensions {
-		if strings.ToLower(e) == ext {
-			return true
-		}
+type uploadResult struct {
+	hashes []string
+	failed []blobWithHash
+}
+
+func (s *Service) uploadBlobsConcurrent(normRoot string, blobs []blobWithHash) []string {
+	if len(blobs) == 0 {
+		return nil
 	}
-	return false
+	batchSize := s.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 50
+	}
+
+	var batches [][]blobWithHash
+	for i := 0; i < len(blobs); i += batchSize {
+		end := i + batchSize
+		if end > len(blobs) {
+			end = len(blobs)
+		}
+		batches = append(batches, blobs[i:end])
+	}
+
+	concurrency := 4
+	if len(batches) < concurrency {
+		concurrency = len(batches)
+	}
+	sem := make(chan struct{}, concurrency)
+	resultCh := make(chan uploadResult, len(batches))
+
+	var wg sync.WaitGroup
+	for _, batch := range batches {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b []blobWithHash) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			res := s.uploadBatch(normRoot, b)
+			resultCh <- res
+		}(batch)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var uploaded []string
+	for res := range resultCh {
+		uploaded = append(uploaded, res.hashes...)
+	}
+	return uploaded
+}
+
+func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResult {
+	blobs := make([]blob, len(batch))
+	hashes := make([]string, len(batch))
+	for i, b := range batch {
+		blobs[i] = b.blob
+		hashes[i] = b.Hash
+	}
+
+	_, err := s.uploadBlobs(blobs)
+	if err == nil {
+		s.removeFailed(normRoot, hashes)
+		return uploadResult{hashes: hashes}
+	}
+
+	var uploaded []string
+	for i, b := range batch {
+		_, berr := s.uploadBlobs([]blob{b.blob})
+		if berr != nil {
+			s.addFailed(normRoot, b.Hash, b.Path, berr.Error())
+			continue
+		}
+		uploaded = append(uploaded, hashes[i])
+		s.removeFailed(normRoot, []string{hashes[i]})
+	}
+	return uploadResult{hashes: uploaded}
+}
+
+func (s *Service) isAllowedTextExt(path string) bool {
+	return s.isAllowedExt(path)
 }
 
 func (s *Service) collectFileBlobs(projectRoot string, relPath string) ([]blob, error) {
