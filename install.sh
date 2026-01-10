@@ -155,7 +155,7 @@ EOF
 
 # Main
 main() {
-    echo -e "${GREEN}🚀 acemcp-go quick installer${NC}"
+    echo -e "${GREEN}[acemcp-go] quick installer${NC}"
     echo
     
     # Detect platform
@@ -183,7 +183,7 @@ main() {
     create_launcher
     
     echo
-    echo -e "${GREEN}✅ Installation complete!${NC}"
+    echo -e "${GREEN}[Installation complete!]${NC}"
     echo
     echo -e "${YELLOW}Next steps:${NC}"
     echo "1. Edit configuration: $CONFIG_DIR/settings.toml"

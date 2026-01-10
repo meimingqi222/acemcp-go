@@ -180,7 +180,7 @@ if (`-not `$daemon) {
 
 # Main
 function Main {
-    Write-ColorOutput "🚀 acemcp-go quick installer" "Green"
+    Write-ColorOutput "[acemcp-go] quick installer" "Green"
     Write-Host ""
     
     # Detect platform
@@ -206,7 +206,7 @@ function Main {
     New-Launcher
     
     Write-Host ""
-    Write-ColorOutput "✅ Installation complete!" "Green"
+    Write-ColorOutput "[Installation complete!]" "Green"
     Write-Host ""
     Write-ColorOutput "Next steps:" "Yellow"
     Write-Host "1. Edit configuration: $InstallDir\settings.toml"
