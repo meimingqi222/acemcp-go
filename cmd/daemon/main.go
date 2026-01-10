@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/meimingqi222/acemcp-go/internal/config"
 	"github.com/meimingqi222/acemcp-go/internal/indexer"
 	"github.com/meimingqi222/acemcp-go/internal/logging"
@@ -63,6 +65,9 @@ func main() {
 	rpcSrv := rpc.New(cfg.Listen, logger)
 	rpcSrv.RegisterCore(cfg, st, idx)
 
+	// Watch settings.toml for changes
+	go watchConfig(cfg, idx, logger)
+
 	errCh := make(chan error, 2)
 	go func() {
 		if err := httpSrv.Start(); err != nil {
@@ -107,4 +112,48 @@ func main() {
 	idx.StopAll()
 
 	logger.Info("acemcp-go daemon stopped")
+}
+
+func watchConfig(cfg *config.Config, idx *indexer.Service, logger *logging.Logger) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Warn("failed to create config watcher", logging.Error(err))
+		return
+	}
+	defer watcher.Close()
+
+	if err := watcher.Add(cfg.SettingsPath); err != nil {
+		logger.Warn("failed to watch settings file", logging.String("path", cfg.SettingsPath), logging.Error(err))
+		return
+	}
+
+	logger.Info("watching config file", logging.String("path", cfg.SettingsPath))
+
+	var debounce *time.Timer
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+				if debounce != nil {
+					debounce.Stop()
+				}
+				debounce = time.AfterFunc(500*time.Millisecond, func() {
+					if err := cfg.Reload(); err != nil {
+						logger.Warn("config reload failed", logging.Error(err))
+						return
+					}
+					idx.RefreshAllowedExts()
+					logger.Info("config reloaded automatically")
+				})
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			logger.Warn("config watcher error", logging.Error(err))
+		}
+	}
 }
