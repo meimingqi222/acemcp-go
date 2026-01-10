@@ -61,11 +61,11 @@ function Invoke-BinaryDownload {
     
     Write-ColorOutput "Downloading acemcp-go $Version for $Platform..." "Green"
     
-    # 创建目录
+    # Create directories
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     
-    # 下载 daemon
+    # Download daemon
     $daemonFile = "acemcp-go-daemon-$Platform.exe"
     $daemonPath = Join-Path $binDir "acemcp-go-daemon.exe"
     
@@ -77,7 +77,7 @@ function Invoke-BinaryDownload {
         exit 1
     }
     
-    # 下载 mcp
+    # Download mcp server
     $mcpFile = "acemcp-go-mcp-$Platform.exe"
     $mcpPath = Join-Path $binDir "acemcp-go-mcp.exe"
     
@@ -126,7 +126,6 @@ function Add-ToPath {
         $newPath = $currentPath + ";" + $binDir
         [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
         Write-ColorOutput "Added $binDir to user PATH" "Green"
-        Write-ColorOutput "✅ Installation complete!" "Green"
         Write-ColorOutput "Please restart Command Prompt or PowerShell" "Yellow"
     }
 }
@@ -138,71 +137,72 @@ function New-Launcher {
     
     $launcherContent = @"
 @echo off
-REM acemcp-go 启动器
+REM acemcp-go launcher
 
 cd /d "$binDir"
 
-REM 检查守护进程是否运行
+REM check daemon
 tasklist /FI "IMAGENAME eq acemcp-go-daemon.exe" 2>NUL | find /I /N "acemcp-go-daemon.exe">NUL
 if errorlevel 1 (
-    echo 启动 acemcp-go 守护进程...
+    echo Starting acemcp-go daemon...
     start /B acemcp-go-daemon.exe
     timeout /t 2 /nobreak >nul
 )
 
-REM 启动 MCP 服务器
+REM start MCP server
 acemcp-go-mcp.exe %*
 "@
     
     $launcherContent | Out-File -FilePath $launcherPath -Encoding ASCII
     Write-ColorOutput "Launcher created: $launcherPath" "Green"
     
-    # 创建 PowerShell 启动器
-    $psLauncherPath = Join-Path $binDir "acemcp.ps1"
+    $binDir = Join-Path $InstallDir "bin"
+    $launcherPath = Join-Path $binDir "acemcp.ps1"
+    
     $psLauncherContent = @"
-# acemcp-go PowerShell 启动器
+# acemcp-go PowerShell launcher
 $binDir = "$binDir"
 
-# 检查守护进程是否运行
-\$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
-if (-not \$daemon) {
-    Write-Host "启动 acemcp-go 守护进程..."
-    Start-Process -FilePath (Join-Path \$binDir "acemcp-go-daemon.exe") -WindowStyle Hidden
+# Check daemon status
+$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
+if (-not $daemon) {
+    Write-Host "Starting acemcp-go daemon..."
+    Start-Process -FilePath (Join-Path $binDir "acemcp-go-daemon.exe") -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
 
-# 启动 MCP 服务器
-& (Join-Path \$binDir "acemcp-go-mcp.exe") \$args
+# Start MCP server
+& (Join-Path $binDir "acemcp-go-mcp.exe") $args
 "@
     
-    $psLauncherContent | Out-File -FilePath $psLauncherPath -Encoding UTF8
+    $psLauncherContent | Out-File -FilePath $launcherPath -Encoding UTF8
 }
 
-# 主函数
+# Main
 function Main {
     Write-ColorOutput "🚀 acemcp-go quick installer" "Green"
     Write-Host ""
     
-    # 检测平台
+    # Detect platform
     $platform = Get-Platform
     Write-ColorOutput "Detected platform: $platform" "Green"
     
-    # 获取版本
+    # Get version
     if ($Version -eq "latest") {
         $Version = Get-LatestVersion
     }
     Write-ColorOutput "Version: $Version" "Green"
     
-    # 下载
+    # Download
     Invoke-BinaryDownload -Version $Version -Platform $platform
     
-    # 创建配置
+    # Create configuration
     New-ConfigFile
     
-    # 添加到 PATH
+    # Add to PATH
     Add-ToPath
     
-    # 创建启动器
+    # Create launcher
     New-Launcher
     
     Write-Host ""
@@ -210,7 +210,7 @@ function Main {
     Write-Host ""
     Write-ColorOutput "Next steps:" "Yellow"
     Write-Host "1. Edit configuration: $InstallDir\settings.toml"
-    Write-Host "2. Restart Command Prompt or PowerShell"
+    Write-Host "2. Restart PowerShell"
     Write-Host "3. Configure Cursor MCP server with command: acemcp"
     Write-Host ""
     Write-ColorOutput "Cursor MCP configuration:" "Yellow"

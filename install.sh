@@ -43,7 +43,7 @@ get_latest_version() {
     elif command -v wget >/dev/null 2>&1; then
         wget -qO- "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4
     else
-        echo -e "${RED}需要 curl 或 wget${NC}"
+        echo -e "${RED}curl or wget is required${NC}"
         exit 1
     fi
 }
