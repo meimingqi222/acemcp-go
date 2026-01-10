@@ -129,6 +129,7 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
+        token: ${{ secrets.GH_PAT }}
         tag_name: ${{ github.ref_name }}
         name: Release ${{ github.ref_name }}
         body: |
@@ -177,5 +178,3 @@ jobs:
           release/*
         draft: false
         prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
