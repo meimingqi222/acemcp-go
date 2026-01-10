@@ -161,7 +161,7 @@ acemcp-go-mcp.exe %*
     
     $psLauncherContent = @"
 # acemcp-go PowerShell launcher
-`$binDir = "`$InstallDir\bin"
+`$binDir = "`$env:USERPROFILE\.acemcp\bin"
 
 # Check daemon status
 `$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
