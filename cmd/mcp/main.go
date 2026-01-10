@@ -136,7 +136,7 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 		_ = json.Unmarshal(req.Params, &p)
 		pv := p.ProtocolVersion
 		if pv == "" {
-			pv = "2025-11-25"
+			pv = "2024-11-05"
 		}
 		resp.Result = map[string]any{
 			"protocolVersion": pv,
@@ -188,7 +188,6 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 					},
 				},
 			},
-			"nextCursor": nil,
 		}
 		return resp
 
