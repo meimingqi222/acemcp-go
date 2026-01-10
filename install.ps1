@@ -40,7 +40,7 @@ function Get-Platform {
 # 获取最新版本
 function Get-LatestVersion {
     try {
-        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/yourorg/acemcp-go/releases/latest" -UseBasicParsing
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/meimingqi222/acemcp-go/releases/latest" -UseBasicParsing
         return $response.tag_name
     }
     catch {
@@ -56,7 +56,7 @@ function Invoke-BinaryDownload {
         [string]$Platform
     )
     
-    $baseUrl = "https://github.com/yourorg/acemcp-go/releases/download/$Version"
+    $baseUrl = "https://github.com/meimingqi222/acemcp-go/releases/download/$Version"
     $binDir = Join-Path $InstallDir "bin"
     
     Write-ColorOutput "正在下载 acemcp-go $Version for $Platform..." "Green"

@@ -38,12 +38,12 @@ acemcp-go/
 
 **Linux/macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.sh | bash
 ```
 
 **Windows:**
 ```powershell
-powershell -c "iwr -useb https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.ps1 | iex"
+powershell -c "iwr -useb https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.ps1 | iex"
 ```
 
 ### 配置 Cursor
@@ -95,12 +95,12 @@ powershell -c "iwr -useb https://raw.githubusercontent.com/yourorg/acemcp-go/mai
 
 **Linux/macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.sh | bash
 ```
 
 **Windows:**
 ```powershell
-powershell -c "iwr -useb https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.ps1 | iex"
+powershell -c "iwr -useb https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.ps1 | iex"
 ```
 
 安装完成后，在 Cursor 中配置 MCP 服务器：
@@ -116,7 +116,7 @@ powershell -c "iwr -useb https://raw.githubusercontent.com/yourorg/acemcp-go/mai
 
 #### 方法 2: 直接下载预编译版本
 
-访问 [Releases 页面](https://github.com/yourorg/acemcp-go/releases) 下载适合您平台的预编译二进制文件。
+访问 [Releases 页面](https://github.com/meimingqi222/acemcp-go/releases) 下载适合您平台的预编译二进制文件。
 
 #### 方法 3: 使用 Makefile
 

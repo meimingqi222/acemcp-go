@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # acemcp-go installer - 快速安装和运行 MCP 服务器
-# 用法: curl -sSL https://raw.githubusercontent.com/yourorg/acemcp-go/main/install.sh | bash
+# 用法: curl -sSL https://raw.githubusercontent.com/meimingqi222/acemcp-go/master/install.sh | bash
 
 set -e
 
@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # 配置
-REPO="yourorg/acemcp-go"
+REPO="meimingqi222/acemcp-go"
 INSTALL_DIR="$HOME/.acemcp"
 BIN_DIR="$INSTALL_DIR/bin"
 CONFIG_DIR="$HOME/.acemcp"
