@@ -50,7 +50,19 @@ func Load(dataDirOverride string) (*Config, error) {
 	v.SetDefault("BASE_URL", "https://api.example.com")
 	v.SetDefault("TOKEN", "")
 	v.SetDefault("HTTP_TOKEN", "")
-	v.SetDefault("TEXT_EXTENSIONS", []string{".py", ".js", ".ts", ".go", ".rs", ".java", ".md", ".txt"})
+	v.SetDefault("TEXT_EXTENSIONS", []string{
+		".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".svelte", ".astro",
+		".go", ".rs", ".java", ".kt", ".groovy", ".gradle",
+		".cs", ".vb", ".fs", ".cpp", ".c", ".h", ".hpp", ".cc", ".cxx",
+		".rb", ".php", ".swift", ".scala", ".clj", ".cljs", ".ex", ".exs",
+		".lua", ".pl", ".pm", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+		".sql", ".r", ".m", ".mm", ".dart", ".zig", ".nim", ".v", ".hs", ".elm",
+		".md", ".txt", ".rst", ".adoc",
+		".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf",
+		".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl",
+		".graphql", ".gql", ".proto", ".thrift",
+		".dockerfile", ".makefile", ".cmake",
+	})
 	v.SetDefault("EXCLUDE_PATTERNS", []string{".git", "node_modules", "vendor", ".venv", "venv", "__pycache__"})
 
 	if err := v.ReadInConfig(); err != nil {
@@ -91,7 +103,19 @@ func (c *Config) Reload() error {
 	v.SetDefault("BASE_URL", "https://api.example.com")
 	v.SetDefault("TOKEN", "")
 	v.SetDefault("HTTP_TOKEN", "")
-	v.SetDefault("TEXT_EXTENSIONS", []string{".py", ".js", ".ts", ".go", ".rs", ".java", ".md", ".txt"})
+	v.SetDefault("TEXT_EXTENSIONS", []string{
+		".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".svelte", ".astro",
+		".go", ".rs", ".java", ".kt", ".groovy", ".gradle",
+		".cs", ".vb", ".fs", ".cpp", ".c", ".h", ".hpp", ".cc", ".cxx",
+		".rb", ".php", ".swift", ".scala", ".clj", ".cljs", ".ex", ".exs",
+		".lua", ".pl", ".pm", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+		".sql", ".r", ".m", ".mm", ".dart", ".zig", ".nim", ".v", ".hs", ".elm",
+		".md", ".txt", ".rst", ".adoc",
+		".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf",
+		".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl",
+		".graphql", ".gql", ".proto", ".thrift",
+		".dockerfile", ".makefile", ".cmake",
+	})
 	v.SetDefault("EXCLUDE_PATTERNS", []string{".git", "node_modules", "vendor", ".venv", "venv", "__pycache__"})
 
 	if err := v.ReadInConfig(); err != nil {

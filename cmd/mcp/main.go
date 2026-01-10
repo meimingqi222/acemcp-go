@@ -181,7 +181,7 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 							},
 							"query": map[string]any{
 								"type":        "string",
-								"description": "A complete natural language sentence describing what code you want to find. Use full sentences like 'Find where the server handles user authentication' or 'Show me the code that processes file uploads'. Avoid keyword lists or comma-separated terms.",
+								"description": "A semantic search query in natural language. MUST be a complete descriptive sentence, NOT a list of keywords. Good examples: 'How does the authentication middleware validate JWT tokens?', 'Find the function that calculates order totals including discounts', 'Where is the database connection pool configured?'. Bad examples: 'auth JWT token', 'order total discount', 'db connection'. The search uses embeddings to find semantically similar code, so descriptive questions work best.",
 							},
 						},
 						"required": []string{"project_root_path", "query"},

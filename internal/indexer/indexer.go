@@ -166,6 +166,16 @@ type Service struct {
 	lastSearchTime time.Time
 }
 
+// RefreshAllowedExts rebuilds allowed extensions from current config.
+func (s *Service) RefreshAllowedExts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowedExts = make(map[string]struct{}, len(s.cfg.TextExtensions))
+	for _, e := range s.cfg.TextExtensions {
+		s.allowedExts[strings.ToLower(e)] = struct{}{}
+	}
+}
+
 func New(cfg *config.Config, logger *logging.Logger) *Service {
 	_ = os.MkdirAll(cfg.DataDir, 0o755)
 	allowedExts := make(map[string]struct{}, len(cfg.TextExtensions))

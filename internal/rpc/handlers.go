@@ -63,6 +63,7 @@ func (s *Server) RegisterCore(cfg *config.Config, st *state.State, idx *indexer.
 		if err := cfg.Reload(); err != nil {
 			return nil, &Error{Code: -32000, Message: "reload failed: " + err.Error()}
 		}
+		idx.RefreshAllowedExts()
 		return map[string]any{
 			"status":  "ok",
 			"message": "config reloaded",
