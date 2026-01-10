@@ -161,18 +161,18 @@ acemcp-go-mcp.exe %*
     
     $psLauncherContent = @"
 # acemcp-go PowerShell launcher
-$binDir = "$binDir"
+`$binDir = "`$InstallDir\bin"
 
 # Check daemon status
-$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
-if (-not $daemon) {
+`$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
+if (`-not `$daemon) {
     Write-Host "Starting acemcp-go daemon..."
-    Start-Process -FilePath (Join-Path $binDir "acemcp-go-daemon.exe") -WindowStyle Hidden
+    Start-Process -FilePath (Join-Path `$binDir "acemcp-go-daemon.exe") -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
 
 # Start MCP server
-& (Join-Path $binDir "acemcp-go-mcp.exe") $args
+& (Join-Path `$binDir "acemcp-go-mcp.exe") `$args
 "@
     
     $psLauncherContent | Out-File -FilePath $launcherPath -Encoding UTF8
