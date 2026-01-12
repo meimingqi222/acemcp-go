@@ -164,6 +164,8 @@ type Service struct {
 	searchRuns     int
 	lastIndexTime  time.Time
 	lastSearchTime time.Time
+
+	lastScanTimes map[string]time.Time // per-project last incremental scan time
 }
 
 // RefreshAllowedExts rebuilds allowed extensions from current config.
@@ -198,6 +200,7 @@ func New(cfg *config.Config, logger *logging.Logger) *Service {
 		filesIdx:       make(filesIndex),
 		failed:         make(map[string][]failedBlob),
 		opLog:          NewOpLogger(200),
+		lastScanTimes:  make(map[string]time.Time),
 	}
 }
 
@@ -256,6 +259,45 @@ func (s *Service) saveFilesIndex(idx filesIndex) error {
 // ListFailed returns project -> failed blobs.
 func (s *Service) ListFailed() (map[string][]failedBlob, error) {
 	return s.loadFailed()
+}
+
+// WatcherDiagnostics contains diagnostic information about file watchers.
+type WatcherDiagnostics struct {
+	Project      string    `json:"project"`
+	HasWatcher   bool      `json:"has_watcher"`
+	LastScanTime string    `json:"last_scan_time"`
+	ScanInterval string    `json:"scan_interval"`
+}
+
+// GetWatcherDiagnostics returns diagnostic information about all active watchers.
+func (s *Service) GetWatcherDiagnostics() ([]WatcherDiagnostics, error) {
+	projects, err := s.loadProjects()
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var diags []WatcherDiagnostics
+	for project := range projects {
+		_, hasWatcher := s.watchers[project]
+		lastScan := s.lastScanTimes[project]
+		var lastScanStr string
+		if lastScan.IsZero() {
+			lastScanStr = "never"
+		} else {
+			lastScanStr = lastScan.Format(time.RFC3339)
+		}
+		diags = append(diags, WatcherDiagnostics{
+			Project:      project,
+			HasWatcher:   hasWatcher,
+			LastScanTime: lastScanStr,
+			ScanInterval: incrementalScanInterval.String(),
+		})
+	}
+
+	return diags, nil
 }
 
 func (s *Service) normalizePath(path string) string {
@@ -990,6 +1032,11 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	defer s.opMu.Unlock()
 
 	normRoot := s.normalizePath(projectRoot)
+	s.logger.Debug("ApplyFileChanges called",
+		logging.String("project", normRoot),
+		logging.Int("upserts", len(upserts)),
+		logging.Int("deletes", len(deletes)),
+	)
 	s.opLog.Infof(OpApply, normRoot, "applying changes: %d upserts, %d deletes", len(upserts), len(deletes))
 	projects, err := s.loadProjects()
 	if err != nil {
@@ -1151,6 +1198,114 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 
 // initialIndexDelay is removed - we now use find-missing API to poll for index readiness
 
+// incrementalScanInterval defines how often to run incremental scans to detect missed files.
+const incrementalScanInterval = 3 * time.Minute
+
+// incrementalScan checks for files that exist on disk but are missing from the index.
+// This catches files that were created while the watcher was not running or missed events.
+func (s *Service) incrementalScan(projectRoot, normRoot string) {
+	s.mu.Lock()
+	lastScan := s.lastScanTimes[normRoot]
+	if time.Since(lastScan) < incrementalScanInterval {
+		s.mu.Unlock()
+		s.logger.Debug("incremental scan skipped (too recent)",
+			logging.String("project", normRoot),
+			logging.String("last_scan", lastScan.Format(time.RFC3339)),
+			logging.String("interval", incrementalScanInterval.String()),
+		)
+		return
+	}
+	s.lastScanTimes[normRoot] = time.Now()
+	s.mu.Unlock()
+
+	s.logger.Info("starting incremental scan",
+		logging.String("project", normRoot),
+		logging.String("last_scan", lastScan.Format(time.RFC3339)),
+	)
+	s.opLog.Info(OpIndex, normRoot, "starting incremental scan for missed files")
+
+	filesIdx, err := s.loadFilesIndex()
+	if err != nil {
+		s.opLog.Errorf(OpIndex, normRoot, "incremental scan: load files index failed: %v", err)
+		return
+	}
+
+	indexed := filesIdx[normRoot]
+	if indexed == nil {
+		indexed = make(map[string][]string)
+	}
+
+	var missingFiles []string
+	var scannedFiles int
+	_ = filepath.WalkDir(projectRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			rel, relErr := filepath.Rel(projectRoot, path)
+			if relErr == nil {
+				rel = strings.ReplaceAll(rel, "\\", "/")
+				if rel != "." && s.shouldSkip(projectRoot, rel, true) {
+					return fs.SkipDir
+				}
+			}
+			return nil
+		}
+		if !s.isAllowedExt(path) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(projectRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = strings.ReplaceAll(rel, "\\", "/")
+		if s.shouldSkip(projectRoot, rel, false) {
+			return nil
+		}
+		scannedFiles++
+		if _, exists := indexed[rel]; !exists {
+			missingFiles = append(missingFiles, rel)
+		}
+		return nil
+	})
+
+	if len(missingFiles) == 0 {
+		s.logger.Info("incremental scan complete",
+			logging.String("project", normRoot),
+			logging.Int("scanned_files", scannedFiles),
+			logging.Int("indexed_files", len(indexed)),
+			logging.Int("missing_files", 0),
+		)
+		s.opLog.Info(OpIndex, normRoot, "incremental scan complete: no missing files")
+		return
+	}
+
+	s.logger.Info("incremental scan found missing files",
+		logging.String("project", normRoot),
+		logging.Int("scanned_files", scannedFiles),
+		logging.Int("indexed_files", len(indexed)),
+		logging.Int("missing_files", len(missingFiles)),
+	)
+	s.opLog.Infof(OpIndex, normRoot, "incremental scan found %d missing files, scheduling for indexing", len(missingFiles))
+
+	// Log each missing file for debugging
+	for i, relPath := range missingFiles {
+		if i < 10 { // Log first 10 missing files
+			s.logger.Debug("missing file detected",
+				logging.String("project", normRoot),
+				logging.String("file", relPath),
+			)
+		}
+		s.scheduleFileChange(normRoot, projectRoot, relPath, false, 100*time.Millisecond)
+	}
+	if len(missingFiles) > 10 {
+		s.logger.Debug("... and more missing files",
+			logging.String("project", normRoot),
+			logging.Int("additional_count", len(missingFiles)-10),
+		)
+	}
+}
+
 // SearchContext ensures indexing, then performs search via remote API.
 func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error) {
 	startTime := time.Now()
@@ -1185,6 +1340,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		justIndexed = true
 	} else {
 		s.flushPendingChanges(normRoot)
+		go s.incrementalScan(projectRoot, normRoot)
 	}
 	indexMs = time.Since(indexStart).Milliseconds()
 
@@ -1363,17 +1519,29 @@ func (s *Service) StartWatching(projectRoot string) {
 	s.mu.Lock()
 	if _, ok := s.watchers[root]; ok {
 		s.mu.Unlock()
+		s.logger.Debug("watcher already exists, skipping",
+			logging.String("project", root),
+		)
 		return
 	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		s.mu.Unlock()
+		s.logger.Error("failed to create watcher",
+			logging.String("project", root),
+			logging.Error(err),
+		)
 		return
 	}
 	s.watchers[root] = w
 	s.mu.Unlock()
 
+	s.logger.Info("starting file watcher",
+		logging.String("project", root),
+	)
+
 	// add all directories
+	var watchedDirs int
 	_ = filepath.WalkDir(projectRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -1388,9 +1556,21 @@ func (s *Service) StartWatching(projectRoot string) {
 				return fs.SkipDir
 			}
 		}
-		_ = w.Add(path)
+		if addErr := w.Add(path); addErr != nil {
+			s.logger.Debug("failed to add directory to watcher",
+				logging.String("path", path),
+				logging.Error(addErr),
+			)
+		} else {
+			watchedDirs++
+		}
 		return nil
 	})
+
+	s.logger.Info("watcher initialized",
+		logging.String("project", root),
+		logging.Int("watched_dirs", watchedDirs),
+	)
 
 	go func() {
 		for {
@@ -1410,6 +1590,12 @@ func (s *Service) StartWatching(projectRoot string) {
 				if rel == "." || strings.HasPrefix(rel, "../") || rel == ".." {
 					continue
 				}
+
+				s.logger.Debug("fsnotify event",
+					logging.String("op", ev.Op.String()),
+					logging.String("path", ev.Name),
+					logging.String("rel", rel),
+				)
 
 				if ev.Op&fsnotify.Create != 0 {
 					if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
@@ -1442,6 +1628,10 @@ func (s *Service) StartWatching(projectRoot string) {
 					s.scheduleFileChange(root, projectRoot, rel, true, 600*time.Millisecond)
 				}
 				if ev.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+					s.logger.Debug("scheduling file change",
+						logging.String("project", root),
+						logging.String("rel", rel),
+					)
 					s.scheduleFileChange(root, projectRoot, rel, false, 600*time.Millisecond)
 				}
 			case err, ok := <-w.Errors:

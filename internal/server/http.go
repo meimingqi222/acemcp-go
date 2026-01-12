@@ -115,6 +115,17 @@ func NewHTTPServer(cfg *config.Config, st *state.State, idx *indexer.Service, lo
 		_ = json.NewEncoder(w).Encode(idx.RecentLogs(50))
 	})
 
+	mux.HandleFunc("/watchers", withOptionalAuth(cfg.HTTPToken, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		diags, err := idx.GetWatcherDiagnostics()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(diags)
+	}))
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           mux,
