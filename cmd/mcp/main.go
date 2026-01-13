@@ -171,13 +171,13 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 			"tools": []tool{
 				{
 					Name:        "search_context",
-					Description: "Search for relevant code context using semantic search within a specific project. This tool automatically indexes the project (if not already indexed) and finds code snippets that match your natural language query. Ideal for locating function implementations, understanding business logic, finding specific code patterns, or analyzing code structure.",
+					Description: "Search for relevant code context using semantic search within a specific project. This tool automatically indexes the project (if not already indexed) and finds code snippets that match your natural language query. Ideal for locating function implementations, understanding business logic, finding specific code patterns, or analyzing code structure.\n\nBEHAVIOR:\n- When you pass a PROJECT ROOT (e.g., 'C:/project' or '/home/dev/project'), it searches ONLY that project.\n- When you pass a PARENT DIRECTORY containing multiple sub-projects (e.g., 'C:/workspace' containing 'project-a', 'project-b'), it automatically:\n  1. Finds all indexed sub-projects\n  2. Indexes any unindexed sub-projects\n  3. Searches across ALL sub-projects together\n\nEach path is indexed independently - searching a sub-project will NOT include results from sibling projects.",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"project_root_path": map[string]any{
 								"type":        "string",
-								"description": "Absolute path to the project root directory. IMPORTANT: Always use forward slashes (/) as path separators, even on Windows. Example: 'C:/Users/username/project' or '/home/user/project'.",
+								"description": "Absolute path to search. For a single project: pass its root directory. For a workspace with multiple projects: pass the parent directory to search across all sub-projects. Examples: 'C:/Users/myapp' or '/home/dev/myproject'.",
 							},
 							"query": map[string]any{
 								"type":        "string",

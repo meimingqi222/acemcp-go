@@ -308,6 +308,69 @@ func (s *Service) normalizePath(path string) string {
 	return strings.ReplaceAll(abs, "\\", "/")
 }
 
+// isSubPath checks if child is a subdirectory of parent.
+func (s *Service) isSubPath(parent, child string) bool {
+	if parent == child {
+		return true
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..") && rel != "."
+}
+
+// findChildProjects finds all indexed projects that are direct children of the given path.
+func (s *Service) findChildProjects(parentPath string) []string {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	normParent := s.normalizePath(parentPath)
+	var children []string
+	for root := range s.projects {
+		if root == normParent {
+			continue
+		}
+		rel, err := filepath.Rel(normParent, root)
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(rel, "..") && rel != "." {
+			children = append(children, root)
+		}
+	}
+	return children
+}
+
+// listCandidateChildDirs lists all potential child project directories under parentPath.
+// This scans the filesystem to find directories that could be projects.
+func (s *Service) listCandidateChildDirs(parentPath string) []string {
+	entries, err := os.ReadDir(parentPath)
+	if err != nil {
+		s.logger.Debug("failed to read parent directory for child projects",
+			logging.String("path", parentPath),
+			logging.Error(err),
+		)
+		return nil
+	}
+
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Skip common non-project directories
+		if name == "node_modules" || name == ".git" || name == "__pycache__" ||
+			name == "vendor" || name == "build" || name == "dist" || name == ".vscode" ||
+			name == ".idea" || name == "target" || name == "out" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(parentPath, name))
+	}
+	return dirs
+}
+
 func (s *Service) isAllowedExt(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	_, ok := s.allowedExts[ext]
@@ -741,11 +804,14 @@ func (s *Service) uploadBlobs(blobs []blob) ([]string, error) {
 }
 
 // IndexProject collects files, uploads new blobs, and updates project state.
+// Note: Each path is indexed independently. Parent and child projects maintain separate indexes.
+// For parent directory search, use SearchContext which aggregates child project results.
 func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	startTime := time.Now()
 	if projectRoot == "" {
 		return nil, fmt.Errorf("project_root_path required")
 	}
+
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	normRoot := s.normalizePath(projectRoot)
@@ -1331,7 +1397,59 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	}
 	indexStart := time.Now()
 	justIndexed := false
-	if len(projects[normRoot]) == 0 {
+	var childProjects []string
+	var useChildAggregation bool
+
+	// Check for indexed child projects (always check, regardless of whether normRoot is indexed)
+	indexedChildren := s.findChildProjects(projectRoot)
+	if len(indexedChildren) > 0 {
+		s.opLog.Infof(OpSearch, normRoot,
+			"found %d indexed child projects, checking for unindexed children", len(indexedChildren))
+
+		// Find candidate child dirs on filesystem
+		candidateDirs := s.listCandidateChildDirs(projectRoot)
+
+		// Identify which candidates are not yet indexed
+		indexedSet := make(map[string]struct{}, len(indexedChildren))
+		for _, c := range indexedChildren {
+			indexedSet[c] = struct{}{}
+		}
+
+		var unindexed []string
+		for _, dir := range candidateDirs {
+			normDir := s.normalizePath(dir)
+			if _, ok := indexedSet[normDir]; !ok {
+				unindexed = append(unindexed, normDir)
+			}
+		}
+
+		if len(unindexed) > 0 {
+			s.opLog.Infof(OpSearch, normRoot,
+				"found %d unindexed child projects, indexing them first", len(unindexed))
+			// Index unindexed child projects
+			for _, childRoot := range unindexed {
+				s.opLog.Infof(OpSearch, normRoot, "indexing child project: %s", childRoot)
+				if _, err := s.IndexProject(childRoot); err != nil {
+					s.opLog.Warnf(OpSearch, normRoot, "failed to index child project %s: %v", childRoot, err)
+				}
+			}
+			// Reload projects to get updated list
+			s.opMu.Lock()
+			projects, err = s.loadProjects()
+			s.opMu.Unlock()
+			if err != nil {
+				s.opLog.Errorf(OpSearch, normRoot, "reload projects failed: %v", err)
+				return nil, err
+			}
+			// Re-fetch indexed children
+			indexedChildren = s.findChildProjects(projectRoot)
+		}
+
+		childProjects = indexedChildren
+		useChildAggregation = true
+		s.flushPendingChanges(normRoot)
+	} else if len(projects[normRoot]) == 0 {
+		// No child projects and this path not indexed - index this path
 		s.opLog.Info(OpSearch, normRoot, "project not indexed, starting initial index")
 		if _, err := s.IndexProject(projectRoot); err != nil {
 			s.opLog.Errorf(OpSearch, normRoot, "initial index failed: %v", err)
@@ -1339,6 +1457,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		}
 		justIndexed = true
 	} else {
+		// This path is indexed and has no child projects
 		s.flushPendingChanges(normRoot)
 		go s.incrementalScan(projectRoot, normRoot)
 	}
@@ -1350,12 +1469,48 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	if err != nil {
 		return nil, err
 	}
-	blobNames := projects[normRoot]
-	if len(blobNames) == 0 {
-		s.opLog.Error(OpSearch, normRoot, "no blobs found after indexing", "")
-		return nil, fmt.Errorf("no blobs found for project")
+
+	// Get blob names: use child aggregation if available, otherwise use own index
+	var blobNames []string
+	if useChildAggregation {
+		// Collect blobs from all child projects (with deduplication)
+		seen := make(map[string]struct{})
+		for _, childRoot := range childProjects {
+			for _, h := range projects[childRoot] {
+				if _, ok := seen[h]; !ok {
+					seen[h] = struct{}{}
+					blobNames = append(blobNames, h)
+				}
+			}
+		}
+		if len(blobNames) == 0 {
+			s.opLog.Error(OpSearch, normRoot, "no blobs found in child projects", "")
+			return nil, fmt.Errorf("no blobs found in child projects")
+		}
+		s.opLog.Infof(OpSearch, normRoot, "searching across %d blobs from %d child projects",
+			len(blobNames), len(childProjects))
+	} else {
+		// Use own index
+		blobNames = projects[normRoot]
+		if len(blobNames) == 0 {
+			s.opLog.Error(OpSearch, normRoot, "no blobs found after indexing", "")
+			return nil, fmt.Errorf("no blobs found for project")
+		}
 	}
-	failedSet := s.getFailedHashes(normRoot)
+
+	// Collect failed blobs: use all child projects' failed blobs for aggregation
+	var failedSet map[string]struct{}
+	if useChildAggregation {
+		failedSet = make(map[string]struct{})
+		for _, childRoot := range childProjects {
+			childFailed := s.getFailedHashes(childRoot)
+			for h := range childFailed {
+				failedSet[h] = struct{}{}
+			}
+		}
+	} else {
+		failedSet = s.getFailedHashes(normRoot)
+	}
 	if len(failedSet) > 0 {
 		filtered := blobNames[:0]
 		for _, h := range blobNames {
@@ -1516,7 +1671,19 @@ func (s *Service) LogsSince(afterID int64) []OpLog {
 // StartWatching starts fsnotify watcher for a project (recursive) with debounce.
 func (s *Service) StartWatching(projectRoot string) {
 	root := s.normalizePath(projectRoot)
+
+	// Check if this path is within an already watched project
 	s.mu.Lock()
+	for watchedRoot := range s.watchers {
+		if s.isSubPath(watchedRoot, root) {
+			s.mu.Unlock()
+			s.logger.Debug("path already covered by existing watcher, skipping",
+				logging.String("project", root),
+				logging.String("existing_watcher", watchedRoot),
+			)
+			return
+		}
+	}
 	if _, ok := s.watchers[root]; ok {
 		s.mu.Unlock()
 		s.logger.Debug("watcher already exists, skipping",
