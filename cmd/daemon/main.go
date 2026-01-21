@@ -68,6 +68,26 @@ func main() {
 	// Watch settings.toml for changes
 	go watchConfig(cfg, idx, logger)
 
+	// Idle timeout check
+	const idleTimeout = 30 * time.Minute
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				lastActivity := rpcSrv.LastActivity()
+				if time.Since(lastActivity) > idleTimeout {
+					logger.Info("idle timeout reached, shutting down", logging.String("idle_time", time.Since(lastActivity).String()))
+					stop() // trigger shutdown
+					return
+				}
+			}
+		}
+	}()
+
 	errCh := make(chan error, 2)
 	go func() {
 		if err := httpSrv.Start(); err != nil {

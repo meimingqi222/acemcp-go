@@ -26,6 +26,8 @@ type Server struct {
 	mu       sync.Mutex
 	running  bool
 	handlers map[string]HandlerFunc
+
+	lastActivity time.Time
 }
 
 // Error represents a JSON-RPC error object.
@@ -52,9 +54,10 @@ type Response struct {
 
 func New(addr string, logger *logging.Logger) *Server {
 	return &Server{
-		addr:     addr,
-		logger:   logger,
-		handlers: make(map[string]HandlerFunc),
+		addr:         addr,
+		logger:       logger,
+		handlers:     make(map[string]HandlerFunc),
+		lastActivity: time.Now(),
 	}
 }
 
@@ -158,6 +161,10 @@ func (s *Server) dispatchSafe(req Request) (resp Response) {
 }
 
 func (s *Server) dispatch(req Request) Response {
+	s.mu.Lock()
+	s.lastActivity = time.Now()
+	s.mu.Unlock()
+
 	if req.JSONRPC != "2.0" {
 		return Response{
 			JSONRPC: "2.0",
@@ -182,6 +189,12 @@ func (s *Server) dispatch(req Request) Response {
 		Error:   rpcErr,
 		ID:      req.ID,
 	}
+}
+
+func (s *Server) LastActivity() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastActivity
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

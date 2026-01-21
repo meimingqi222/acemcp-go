@@ -31,7 +31,9 @@ type blob struct {
 
 type blobWithHash struct {
 	blob
-	Hash string
+	Hash  string
+	Mtime int64
+	Size  int64
 }
 
 func (s *Service) removeFailed(projectPath string, hashes []string) {
@@ -227,7 +229,13 @@ type failedBlob struct {
 	Timestamp string `json:"timestamp"`
 }
 
-type filesIndex map[string]map[string][]string // project_root -> file_path -> blob_hashes
+type fileMetadata struct {
+	Hashes []string `json:"hashes"`
+	Mtime  int64    `json:"mtime"`
+	Size   int64    `json:"size"`
+}
+
+type filesIndex map[string]map[string]fileMetadata // project_root -> file_path -> metadata
 
 type pendingChanges struct {
 	projectRoot string
@@ -455,17 +463,29 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 }
 
 func (s *Service) processFile(absPath, relPath string, maxLines int) []blobWithHash {
-	data, err := os.ReadFile(absPath)
+	f, err := os.Open(absPath)
 	if err != nil {
 		s.logger.Warn("read file failed", logging.String("file", relPath), logging.Error(err))
 		return nil
 	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil
+	}
+
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
 	if len(lines) <= maxLines {
 		b := blob{Path: relPath, Content: content}
-		return []blobWithHash{{blob: b, Hash: hashBlob(b)}}
+		return []blobWithHash{{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size()}}
 	}
 
 	total := len(lines)
@@ -480,7 +500,7 @@ func (s *Service) processFile(absPath, relPath string, maxLines int) []blobWithH
 		chunkContent := strings.Join(lines[start:end], "\n")
 		chunkPath := fmt.Sprintf("%s#chunk%dof%d", relPath, i+1, chunks)
 		b := blob{Path: chunkPath, Content: chunkContent}
-		result = append(result, blobWithHash{blob: b, Hash: hashBlob(b)})
+		result = append(result, blobWithHash{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size()})
 	}
 	return result
 }
@@ -516,7 +536,27 @@ func (s *Service) ensureCacheLoaded() error {
 	}
 	b, err = os.ReadFile(s.filesPath)
 	if err == nil && len(b) > 0 {
-		_ = json.Unmarshal(b, &s.filesIdx)
+		if err := json.Unmarshal(b, &s.filesIdx); err != nil {
+			// Try migration from v1 (map[string]map[string][]string)
+			var v1 map[string]map[string][]string
+			if errV1 := json.Unmarshal(b, &v1); errV1 == nil {
+				s.logger.Info("migrating index from v1 to v2")
+				s.filesIdx = make(filesIndex)
+				for proj, files := range v1 {
+					s.filesIdx[proj] = make(map[string]fileMetadata)
+					for path, hashes := range files {
+						s.filesIdx[proj][path] = fileMetadata{
+							Hashes: hashes,
+							Mtime:  0,
+							Size:   0,
+						}
+					}
+				}
+				s.cacheDirty = true
+			} else {
+				s.logger.Warn("failed to load files index", logging.Error(err))
+			}
+		}
 	}
 	b, err = os.ReadFile(s.failedPath)
 	if err == nil && len(b) > 0 {
@@ -585,11 +625,15 @@ func (s *Service) loadFilesIndexCached() (filesIndex, error) {
 	defer s.cacheMu.RUnlock()
 	result := make(filesIndex, len(s.filesIdx))
 	for k, v := range s.filesIdx {
-		cp := make(map[string][]string, len(v))
+		cp := make(map[string]fileMetadata, len(v))
 		for fk, fv := range v {
-			hcp := make([]string, len(fv))
-			copy(hcp, fv)
-			cp[fk] = hcp
+			hcp := make([]string, len(fv.Hashes))
+			copy(hcp, fv.Hashes)
+			cp[fk] = fileMetadata{
+				Hashes: hcp,
+				Mtime:  fv.Mtime,
+				Size:   fv.Size,
+			}
 		}
 		result[k] = cp
 	}
@@ -845,22 +889,45 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	}
 	prevFiles := filesIdx[normRoot]
 	if prevFiles == nil {
-		prevFiles = map[string][]string{}
+		prevFiles = map[string]fileMetadata{}
 	}
-	currentFiles := map[string][]string{}
+	currentFiles := map[string]fileMetadata{}
 	currentHashes := map[string]struct{}{}
+	
+	// Group blobs by file to update metadata
+	blobsByFile := make(map[string][]blobWithHash)
 	for _, b := range blobs {
 		base := b.Path
 		if i := strings.Index(base, "#chunk"); i >= 0 {
 			base = base[:i]
 		}
-		currentFiles[base] = append(currentFiles[base], b.Hash)
+		blobsByFile[base] = append(blobsByFile[base], b)
 		currentHashes[b.Hash] = struct{}{}
 	}
 
+	for relPath, fblobs := range blobsByFile {
+		hashes := make([]string, len(fblobs))
+		for i, b := range fblobs {
+			hashes[i] = b.Hash
+		}
+		
+		// Use metadata from the first chunk (all chunks have same mtime/size from processFile)
+		var mtime, size int64
+		if len(fblobs) > 0 {
+			mtime = fblobs[0].Mtime
+			size = fblobs[0].Size
+		}
+
+		currentFiles[relPath] = fileMetadata{
+			Hashes: hashes,
+			Mtime:  mtime,
+			Size:   size,
+		}
+	}
+
 	removed := make([]string, 0)
-	for _, hs := range prevFiles {
-		for _, h := range hs {
+	for _, meta := range prevFiles {
+		for _, h := range meta.Hashes {
 			if _, ok := currentHashes[h]; !ok {
 				removed = append(removed, h)
 			}
@@ -1114,7 +1181,7 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	}
 	prevFiles := filesIdx[normRoot]
 	if prevFiles == nil {
-		prevFiles = map[string][]string{}
+		prevFiles = map[string]fileMetadata{}
 	}
 	projectSet := make(map[string]struct{}, len(projects[normRoot]))
 	for _, h := range projects[normRoot] {
@@ -1124,12 +1191,12 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 	removedHashes := make([]string, 0)
 	for _, rel := range deletes {
 		rel = strings.ReplaceAll(rel, "\\", "/")
-		old := prevFiles[rel]
-		if len(old) == 0 {
+		meta := prevFiles[rel]
+		if len(meta.Hashes) == 0 {
 			delete(prevFiles, rel)
 			continue
 		}
-		for _, h := range old {
+		for _, h := range meta.Hashes {
 			removedHashes = append(removedHashes, h)
 			delete(projectSet, h)
 		}
@@ -1144,9 +1211,9 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 		abs := filepath.Join(projectRoot, filepath.FromSlash(rel))
 		info, statErr := os.Stat(abs)
 		if statErr != nil {
-			old := prevFiles[rel]
-			if len(old) > 0 {
-				for _, h := range old {
+			meta := prevFiles[rel]
+			if len(meta.Hashes) > 0 {
+				for _, h := range meta.Hashes {
 					removedHashes = append(removedHashes, h)
 					delete(projectSet, h)
 				}
@@ -1158,9 +1225,9 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 			continue
 		}
 		if s.shouldSkip(projectRoot, rel, false) || !s.isAllowedTextExt(rel) {
-			old := prevFiles[rel]
-			if len(old) > 0 {
-				for _, h := range old {
+			meta := prevFiles[rel]
+			if len(meta.Hashes) > 0 {
+				for _, h := range meta.Hashes {
 					removedHashes = append(removedHashes, h)
 					delete(projectSet, h)
 				}
@@ -1186,9 +1253,9 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 			newSet[h] = struct{}{}
 		}
 
-		old := prevFiles[rel]
-		if len(old) > 0 {
-			for _, h := range old {
+		meta := prevFiles[rel]
+		if len(meta.Hashes) > 0 {
+			for _, h := range meta.Hashes {
 				if _, ok := newSet[h]; ok {
 					continue
 				}
@@ -1238,7 +1305,11 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 			}
 		}
 
-		prevFiles[rel] = newHashes
+		prevFiles[rel] = fileMetadata{
+			Hashes: newHashes,
+			Mtime:  info.ModTime().Unix(),
+			Size:   info.Size(),
+		}
 	}
 
 	if len(removedHashes) > 0 {
@@ -1298,7 +1369,7 @@ func (s *Service) incrementalScan(projectRoot, normRoot string) {
 
 	indexed := filesIdx[normRoot]
 	if indexed == nil {
-		indexed = make(map[string][]string)
+		indexed = make(map[string]fileMetadata)
 	}
 
 	var missingFiles []string
@@ -1329,7 +1400,19 @@ func (s *Service) incrementalScan(projectRoot, normRoot string) {
 			return nil
 		}
 		scannedFiles++
-		if _, exists := indexed[rel]; !exists {
+		
+		meta, exists := indexed[rel]
+		if !exists {
+			missingFiles = append(missingFiles, rel)
+			return nil
+		}
+		
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		
+		if meta.Mtime != info.ModTime().Unix() || meta.Size != info.Size() {
 			missingFiles = append(missingFiles, rel)
 		}
 		return nil
@@ -1340,24 +1423,24 @@ func (s *Service) incrementalScan(projectRoot, normRoot string) {
 			logging.String("project", normRoot),
 			logging.Int("scanned_files", scannedFiles),
 			logging.Int("indexed_files", len(indexed)),
-			logging.Int("missing_files", 0),
+			logging.Int("changed_files", 0),
 		)
-		s.opLog.Info(OpIndex, normRoot, "incremental scan complete: no missing files")
+		s.opLog.Info(OpIndex, normRoot, "incremental scan complete: no missing or changed files")
 		return
 	}
 
-	s.logger.Info("incremental scan found missing files",
+	s.logger.Info("incremental scan found missing or changed files",
 		logging.String("project", normRoot),
 		logging.Int("scanned_files", scannedFiles),
 		logging.Int("indexed_files", len(indexed)),
-		logging.Int("missing_files", len(missingFiles)),
+		logging.Int("changed_files", len(missingFiles)),
 	)
-	s.opLog.Infof(OpIndex, normRoot, "incremental scan found %d missing files, scheduling for indexing", len(missingFiles))
+	s.opLog.Infof(OpIndex, normRoot, "incremental scan found %d missing or changed files, scheduling for indexing", len(missingFiles))
 
-	// Log each missing file for debugging
+	// Log each changed file for debugging
 	for i, relPath := range missingFiles {
-		if i < 10 { // Log first 10 missing files
-			s.logger.Debug("missing file detected",
+		if i < 10 { // Log first 10 changed files
+			s.logger.Debug("changed file detected",
 				logging.String("project", normRoot),
 				logging.String("file", relPath),
 			)
@@ -1365,7 +1448,7 @@ func (s *Service) incrementalScan(projectRoot, normRoot string) {
 		s.scheduleFileChange(normRoot, projectRoot, relPath, false, 100*time.Millisecond)
 	}
 	if len(missingFiles) > 10 {
-		s.logger.Debug("... and more missing files",
+		s.logger.Debug("... and more changed files",
 			logging.String("project", normRoot),
 			logging.Int("additional_count", len(missingFiles)-10),
 		)
