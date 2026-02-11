@@ -1,48 +1,29 @@
 #!/bin/bash
-
-# 多平台构建脚本
-# 支持构建不同平台的二进制文件
+# Build script for all platforms with version injection
 
 set -e
 
-echo "开始多平台构建 acemcp-go 项目..."
+# Get version from git tag, or use "dev" if not on a tag
+VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# 创建 dist 目录
+# ldflags for version injection
+LDFLAGS="-s -w \
+    -X github.com/meimingqi222/acemcp-go/internal/version.Version=${VERSION} \
+    -X github.com/meimingqi222/acemcp-go/internal/version.GitCommit=${GIT_COMMIT} \
+    -X github.com/meimingqi222/acemcp-go/internal/version.BuildTime=${BUILD_TIME}"
+
+echo "Building acemcp-go..."
+echo "Version: ${VERSION}"
+echo "Commit: ${GIT_COMMIT}"
+echo "Build Time: ${BUILD_TIME}"
+echo ""
+
 mkdir -p dist
 
-# 清理旧的构建文件
-echo "清理旧的构建文件..."
-rm -f dist/*
-
-# 定义平台和架构
-PLATFORMS="linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64"
-
-for PLATFORM in $PLATFORMS; do
-    PLATFORM_SPLIT=(${PLATFORM//\// })
-    GOOS=${PLATFORM_SPLIT[0]}
-    GOARCH=${PLATFORM_SPLIT[1]}
-    
-    echo "构建 $GOOS/$GOARCH..."
-    
-    # 设置输出文件名
-    OUTPUT_DAEMON="dist/acemcp-go-daemon-$GOOS-$GOARCH"
-    OUTPUT_MCP="dist/acemcp-go-mcp-$GOOS-$GOARCH"
-    
-    # Windows 平台添加 .exe 扩展名
-    if [ $GOOS = "windows" ]; then
-        OUTPUT_DAEMON="$OUTPUT_DAEMON.exe"
-        OUTPUT_MCP="$OUTPUT_MCP.exe"
-    fi
-    
-    # 构建
-    GOOS=$GOOS GOARCH=$GOARCH go build -o $OUTPUT_DAEMON ./cmd/daemon
-    GOOS=$GOOS GOARCH=$GOARCH go build -o $OUTPUT_MCP ./cmd/mcp
-    
-    echo "  ✓ $OUTPUT_DAEMON"
-    echo "  ✓ $OUTPUT_MCP"
-done
-
-echo ""
-echo "多平台构建完成！"
-echo "构建结果位于 dist/ 目录："
-ls -la dist/
+# Build for current platform
+echo "Building for current platform..."
+go build -ldflags="${LDFLAGS}" -o dist/acemcp-go-daemon ./cmd/daemon
+go build -ldflags="${LDFLAGS}" -o dist/acemcp-go-mcp ./cmd/mcp
+echo "Done!"

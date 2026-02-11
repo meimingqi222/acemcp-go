@@ -78,22 +78,34 @@ jobs:
     - name: Run tests
       run: go test ./...
 
+    - name: Get version from tag
+      id: version
+      shell: bash
+      run: |
+        VERSION=${{ github.ref_name }}
+        if [ -z "$VERSION" ]; then
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        fi
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+
     - name: Build daemon
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: 0
+        VERSION: ${{ steps.version.outputs.VERSION }}
       run: |
         mkdir -p dist
-        go build -ldflags="-s -w" -o dist/acemcp-go-daemon-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/daemon
+        go build -ldflags="-s -w -X github.com/meimingqi222/acemcp-go/internal/version.Version=$VERSION" -o dist/acemcp-go-daemon-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/daemon
 
     - name: Build mcp
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: 0
+        VERSION: ${{ steps.version.outputs.VERSION }}
       run: |
-        go build -ldflags="-s -w" -o dist/acemcp-go-mcp-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/mcp
+        go build -ldflags="-s -w -X github.com/meimingqi222/acemcp-go/internal/version.Version=$VERSION" -o dist/acemcp-go-mcp-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/mcp
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -133,45 +145,45 @@ jobs:
         name: Release ${{ github.ref_name }}
         body: |
           ## acemcp-go ${{ github.ref_name }}
-          
+
           ### 🚀 Downloads
-          
+
           Choose the appropriate binary for your platform:
-          
+
           **Linux:**
           - `acemcp-go-daemon-linux-amd64` - Linux x86_64
           - `acemcp-go-mcp-linux-amd64` - Linux x86_64
           - `acemcp-go-daemon-linux-arm64` - Linux ARM64
           - `acemcp-go-mcp-linux-arm64` - Linux ARM64
-          
+
           **Windows:**
           - `acemcp-go-daemon-windows-amd64.exe` - Windows x86_64
           - `acemcp-go-mcp-windows-amd64.exe` - Windows x86_64
-          
+
           **macOS:**
           - `acemcp-go-daemon-darwin-amd64` - macOS Intel
           - `acemcp-go-mcp-darwin-amd64` - macOS Intel
           - `acemcp-go-daemon-darwin-arm64` - macOS Apple Silicon
           - `acemcp-go-mcp-darwin-arm64` - macOS Apple Silicon
-          
+
           ### 📋 Verification
-          
+
           Verify the integrity of downloaded files using the provided SHA256 checksums:
           ```bash
           sha256sum -c checksums.txt
           ```
-          
+
           ### 🚀 Quick Start
-          
+
           1. Download the appropriate binaries for your platform
           2. Make them executable (Linux/macOS): `chmod +x acemcp-go-*`
           3. Run the daemon: `./acemcp-go-daemon`
           4. Use the MCP server: `./acemcp-go-mcp`
-          
+
           For detailed instructions, see the [README.md](https://github.com/${{ github.repository }}/blob/main/README.md).
-          
+
           ---
-          
+
           🤖 This release was automatically created.
         files: |
           release/*

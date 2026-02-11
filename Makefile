@@ -2,28 +2,40 @@
 
 .PHONY: build clean build-all install test help
 
+# Version info from git or defaults
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# ldflags for version injection
+LDFLAGS := -s -w \
+    -X github.com/meimingqi222/acemcp-go/internal/version.Version=$(VERSION) \
+    -X github.com/meimingqi222/acemcp-go/internal/version.GitCommit=$(GIT_COMMIT) \
+    -X github.com/meimingqi222/acemcp-go/internal/version.BuildTime=$(BUILD_TIME)
+
 # 默认目标
 build:
 	@echo "构建 acemcp-go 项目..."
+	@echo "Version: $(VERSION), Commit: $(GIT_COMMIT)"
 	@mkdir -p dist
-	@go build -o dist/acemcp-go-daemon ./cmd/daemon
-	@go build -o dist/acemcp-go-mcp ./cmd/mcp
+	@go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon ./cmd/daemon
+	@go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp ./cmd/mcp
 	@echo "构建完成！可执行文件位于 dist/ 目录"
 
 # Windows 构建
 build-windows:
 	@echo "构建 Windows 版本..."
 	@mkdir -p dist
-	@GOOS=windows GOARCH=amd64 go build -o dist/acemcp-go-daemon.exe ./cmd/daemon
-	@GOOS=windows GOARCH=amd64 go build -o dist/acemcp-go-mcp.exe ./cmd/mcp
+	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon.exe ./cmd/daemon
+	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp.exe ./cmd/mcp
 	@echo "Windows 构建完成！"
 
 # Linux 构建
 build-linux:
 	@echo "构建 Linux 版本..."
 	@mkdir -p dist
-	@GOOS=linux GOARCH=amd64 go build -o dist/acemcp-go-daemon-linux-amd64 ./cmd/daemon
-	@GOOS=linux GOARCH=amd64 go build -o dist/acemcp-go-mcp-linux-amd64 ./cmd/mcp
+	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon-linux-amd64 ./cmd/daemon
+	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp-linux-amd64 ./cmd/mcp
 	@echo "Linux 构建完成！"
 
 # 多平台构建
