@@ -18,6 +18,7 @@ type Config struct {
 	LogLevel        string // debug|info|warn|error
 	BatchSize       int
 	MaxLinesPerBlob int
+	MaxLineBytes    int // max bytes per line, skip file if exceeded
 	BaseURL         string
 	Token           string
 	TextExtensions  []string
@@ -47,6 +48,7 @@ func Load(dataDirOverride string) (*Config, error) {
 	v.SetDefault("LOG_LEVEL", "info")
 	v.SetDefault("BATCH_SIZE", 10)
 	v.SetDefault("MAX_LINES_PER_BLOB", 800)
+	v.SetDefault("MAX_LINE_BYTES", 10*1024) // 10KB
 	v.SetDefault("BASE_URL", "https://api.example.com")
 	v.SetDefault("TOKEN", "")
 	v.SetDefault("HTTP_TOKEN", "")
@@ -81,6 +83,7 @@ func Load(dataDirOverride string) (*Config, error) {
 		LogLevel:        v.GetString("LOG_LEVEL"),
 		BatchSize:       v.GetInt("BATCH_SIZE"),
 		MaxLinesPerBlob: v.GetInt("MAX_LINES_PER_BLOB"),
+		MaxLineBytes:    v.GetInt("MAX_LINE_BYTES"),
 		BaseURL:         v.GetString("BASE_URL"),
 		Token:           v.GetString("TOKEN"),
 		TextExtensions:  v.GetStringSlice("TEXT_EXTENSIONS"),
@@ -100,6 +103,7 @@ func (c *Config) Reload() error {
 	v.SetDefault("LOG_LEVEL", "info")
 	v.SetDefault("BATCH_SIZE", 10)
 	v.SetDefault("MAX_LINES_PER_BLOB", 800)
+	v.SetDefault("MAX_LINE_BYTES", 100*1024)
 	v.SetDefault("BASE_URL", "https://api.example.com")
 	v.SetDefault("TOKEN", "")
 	v.SetDefault("HTTP_TOKEN", "")
@@ -127,6 +131,7 @@ func (c *Config) Reload() error {
 
 	c.BatchSize = v.GetInt("BATCH_SIZE")
 	c.MaxLinesPerBlob = v.GetInt("MAX_LINES_PER_BLOB")
+	c.MaxLineBytes = v.GetInt("MAX_LINE_BYTES")
 	c.BaseURL = v.GetString("BASE_URL")
 	c.Token = v.GetString("TOKEN")
 	c.HTTPToken = v.GetString("HTTP_TOKEN")

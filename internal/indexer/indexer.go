@@ -3,9 +3,11 @@ package indexer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -413,7 +415,7 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
-				blobs := s.processFile(task.absPath, task.relPath, maxLines)
+				blobs := s.processFile(root, task.absPath, task.relPath, maxLines)
 				if len(blobs) > 0 {
 					results <- blobs
 				}
@@ -462,7 +464,7 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 	return allBlobs, nil
 }
 
-func (s *Service) processFile(absPath, relPath string, maxLines int) []blobWithHash {
+func (s *Service) processFile(projectRoot, absPath, relPath string, maxLines int) []blobWithHash {
 	f, err := os.Open(absPath)
 	if err != nil {
 		s.logger.Warn("read file failed", logging.String("file", relPath), logging.Error(err))
@@ -482,6 +484,15 @@ func (s *Service) processFile(absPath, relPath string, maxLines int) []blobWithH
 
 	content := string(data)
 	lines := strings.Split(content, "\n")
+
+	if maxBytes := s.cfg.MaxLineBytes; maxBytes > 0 {
+		for i, line := range lines {
+			if len(line) > maxBytes {
+				s.opLog.Warnf(OpCollect, s.normalizePath(projectRoot), "skipped %s: line %d too long (%d > %d)", relPath, i+1, len(line), maxBytes)
+				return nil
+			}
+		}
+	}
 
 	if len(lines) <= maxLines {
 		b := blob{Path: relPath, Content: content}
@@ -718,6 +729,14 @@ type findMissingResult struct {
 	NonindexedBlobNames []string `json:"nonindexed_blob_names"`
 }
 
+type TokenRemoteCheck struct {
+	OK         bool   `json:"ok"`
+	StatusCode int    `json:"status_code,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	Error      string `json:"error,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
 func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
 	payload := map[string]any{
 		"mem_object_names": blobNames,
@@ -749,6 +768,88 @@ func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
 		return nil, err
 	}
 	return &res, nil
+}
+
+func (s *Service) CheckToken(ctx context.Context) TokenRemoteCheck {
+	start := time.Now()
+	u, err := url.Parse(strings.TrimRight(s.cfg.BaseURL, "/") + "/find-missing")
+	if err != nil {
+		return TokenRemoteCheck{OK: false, Error: fmt.Sprintf("invalid base_url: %v", err)}
+	}
+
+	payload := map[string]any{
+		"mem_object_names": []string{"__acemcp_token_check__"},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return TokenRemoteCheck{OK: false, Error: err.Error()}
+	}
+
+	endpoint := u.String()
+	maxRetries := 3
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+		if err != nil {
+			return TokenRemoteCheck{OK: false, Error: err.Error(), DurationMs: time.Since(start).Milliseconds()}
+		}
+		req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries-1 {
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+			return TokenRemoteCheck{OK: false, Error: err.Error(), DurationMs: time.Since(start).Milliseconds()}
+		}
+
+		reqID := resp.Header.Get("x-request-id")
+		if reqID == "" {
+			reqID = resp.Header.Get("x-amzn-requestid")
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limited := io.LimitReader(resp.Body, 16*1024)
+			b, _ := io.ReadAll(limited)
+			_ = resp.Body.Close()
+
+			retriable := resp.StatusCode == http.StatusRequestTimeout ||
+				resp.StatusCode == http.StatusTooManyRequests ||
+				(resp.StatusCode >= 500 && resp.StatusCode <= 599)
+			if retriable && attempt < maxRetries-1 {
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+
+			return TokenRemoteCheck{
+				OK:         false,
+				StatusCode: resp.StatusCode,
+				RequestID:  reqID,
+				Error:      strings.TrimSpace(string(b)),
+				DurationMs: time.Since(start).Milliseconds(),
+			}
+		}
+
+		var out findMissingResult
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			lastErr = err
+			_ = resp.Body.Close()
+			if attempt < maxRetries-1 {
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+			return TokenRemoteCheck{OK: false, Error: err.Error(), DurationMs: time.Since(start).Milliseconds()}
+		}
+		_ = resp.Body.Close()
+		return TokenRemoteCheck{OK: true, StatusCode: resp.StatusCode, RequestID: reqID, DurationMs: time.Since(start).Milliseconds()}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("token check failed: unknown error")
+	}
+	return TokenRemoteCheck{OK: false, Error: lastErr.Error(), DurationMs: time.Since(start).Milliseconds()}
 }
 
 func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool {
@@ -800,51 +901,131 @@ func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool 
 	return false
 }
 
+type apiHTTPError struct {
+	StatusCode int
+	Body       string
+	RequestID  string
+}
+
+func (e *apiHTTPError) Error() string {
+	body := strings.TrimSpace(e.Body)
+	if len(body) > 1024 {
+		body = body[:1024]
+	}
+	if e.RequestID != "" {
+		return fmt.Sprintf("upload failed (status %d, request_id %s): %s", e.StatusCode, e.RequestID, body)
+	}
+	return fmt.Sprintf("upload failed (status %d): %s", e.StatusCode, body)
+}
+
+func statusCodeFromErr(err error) (int, bool) {
+	var he *apiHTTPError
+	if errors.As(err, &he) {
+		return he.StatusCode, true
+	}
+	return 0, false
+}
+
+func retryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	base := 300 * time.Millisecond
+	max := 5 * time.Second
+	d := base * time.Duration(1<<attempt)
+	if d > max {
+		d = max
+	}
+	jitter := time.Duration(time.Now().UnixNano()%int64(200*time.Millisecond))
+	return d + jitter
+}
+
 func (s *Service) uploadBlobs(blobs []blob) ([]string, error) {
 	payload := map[string]any{
 		"blobs": blobs,
 	}
-	body, _ := json.Marshal(payload)
 	u, err := url.Parse(strings.TrimRight(s.cfg.BaseURL, "/") + "/batch-upload")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base_url: %w", err)
 	}
-
-	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
-	req.Header.Set("Content-Type", "application/json")
 
-	var resp *http.Response
-	maxRetries := 3
+	endpoint := u.String()
+	maxRetries := 5
+	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		resp, err = s.client.Do(req)
-		if err == nil {
-			break
+		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
-		s.logger.Warn("upload request failed, retrying",
-			logging.Error(err),
-			logging.Int("attempt", attempt+1),
-		)
-		time.Sleep(time.Duration(attempt+1) * time.Second)
+		req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries-1 {
+				s.logger.Warn("upload request failed, retrying",
+					logging.Error(err),
+					logging.Int("attempt", attempt+1),
+				)
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+			return nil, err
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limited := io.LimitReader(resp.Body, 16*1024)
+			b, _ := io.ReadAll(limited)
+			_ = resp.Body.Close()
+			reqID := resp.Header.Get("x-request-id")
+			if reqID == "" {
+				reqID = resp.Header.Get("x-amzn-requestid")
+			}
+			he := &apiHTTPError{StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
+			lastErr = he
+			retriable := resp.StatusCode == http.StatusRequestTimeout ||
+				resp.StatusCode == http.StatusTooManyRequests ||
+				(resp.StatusCode >= 500 && resp.StatusCode <= 599)
+			if retriable && attempt < maxRetries-1 {
+				s.logger.Warn("upload failed, retrying",
+					logging.Int("status_code", resp.StatusCode),
+					logging.String("request_id", reqID),
+					logging.Int("attempt", attempt+1),
+				)
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+			return nil, he
+		}
+
+		var res struct {
+			BlobNames []string `json:"blob_names"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			lastErr = err
+			_ = resp.Body.Close()
+			if attempt < maxRetries-1 {
+				s.logger.Warn("upload response decode failed, retrying",
+					logging.Error(err),
+					logging.Int("attempt", attempt+1),
+				)
+				time.Sleep(retryDelay(attempt))
+				continue
+			}
+			return nil, err
+		}
+		_ = resp.Body.Close()
+		return res.BlobNames, nil
 	}
-	if err != nil {
-		return nil, err
+	if lastErr == nil {
+		lastErr = fmt.Errorf("upload failed: unknown error")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upload failed: %s", string(b))
-	}
-	var res struct {
-		BlobNames []string `json:"blob_names"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
-	}
-	return res.BlobNames, nil
+	return nil, lastErr
 }
 
 // IndexProject collects files, uploads new blobs, and updates project state.
@@ -1053,6 +1234,67 @@ func (s *Service) uploadBlobsConcurrent(normRoot string, blobs []blobWithHash) [
 	return uploaded
 }
 
+func (s *Service) uploadBatchSplit(normRoot string, batch []blobWithHash, depth int) uploadResult {
+	if len(batch) == 0 {
+		return uploadResult{}
+	}
+
+	if len(batch) == 1 {
+		b := batch[0]
+		_, err := s.uploadBlobs([]blob{b.blob})
+		if err != nil {
+			s.opLog.Error(OpUpload, normRoot, fmt.Sprintf("upload failed: %s", b.Path), err.Error())
+			s.logger.Warn("individual blob upload failed",
+				logging.String("path", b.Path),
+				logging.Error(err),
+			)
+			s.addFailed(normRoot, b.Hash, b.Path, err.Error())
+			return uploadResult{failed: []blobWithHash{b}}
+		}
+		return uploadResult{hashes: []string{b.Hash}}
+	}
+
+	blobs := make([]blob, len(batch))
+	hashes := make([]string, len(batch))
+	for i, b := range batch {
+		blobs[i] = b.blob
+		hashes[i] = b.Hash
+	}
+
+	_, err := s.uploadBlobs(blobs)
+	if err == nil {
+		return uploadResult{hashes: hashes}
+	}
+
+	if depth <= 0 {
+		var uploaded []string
+		var failed []blobWithHash
+		for _, b := range batch {
+			_, berr := s.uploadBlobs([]blob{b.blob})
+			if berr != nil {
+				s.opLog.Error(OpUpload, normRoot, fmt.Sprintf("upload failed: %s", b.Path), berr.Error())
+				s.logger.Warn("individual blob upload failed",
+					logging.String("path", b.Path),
+					logging.Error(berr),
+				)
+				s.addFailed(normRoot, b.Hash, b.Path, berr.Error())
+				failed = append(failed, b)
+				continue
+			}
+			uploaded = append(uploaded, b.Hash)
+		}
+		return uploadResult{hashes: uploaded, failed: failed}
+	}
+
+	mid := len(batch) / 2
+	left := s.uploadBatchSplit(normRoot, batch[:mid], depth-1)
+	right := s.uploadBatchSplit(normRoot, batch[mid:], depth-1)
+	return uploadResult{
+		hashes: append(left.hashes, right.hashes...),
+		failed: append(left.failed, right.failed...),
+	}
+}
+
 func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResult {
 	blobs := make([]blob, len(batch))
 	hashes := make([]string, len(batch))
@@ -1067,33 +1309,22 @@ func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResul
 		return uploadResult{hashes: hashes}
 	}
 
-	s.opLog.Warnf(OpUpload, normRoot, "batch upload failed (%d blobs): %v", len(batch), err)
-	s.logger.Warn("batch upload failed, trying individual uploads",
+	s.opLog.Warnf(OpUpload, normRoot, "batch upload failed (%d blobs), falling back to smaller batches: %v", len(batch), err)
+	s.logger.Warn("batch upload failed, falling back to smaller batches",
 		logging.Error(err),
 		logging.Int("batch_size", len(batch)),
 	)
 
-	var uploaded []string
-	var failedCount int
-	for i, b := range batch {
-		_, berr := s.uploadBlobs([]blob{b.blob})
-		if berr != nil {
-			failedCount++
-			s.opLog.Error(OpUpload, normRoot, fmt.Sprintf("upload failed: %s", b.Path), berr.Error())
-			s.logger.Warn("individual blob upload failed",
-				logging.String("path", b.Path),
-				logging.Error(berr),
-			)
-			s.addFailed(normRoot, b.Hash, b.Path, berr.Error())
-			continue
-		}
-		uploaded = append(uploaded, hashes[i])
-		s.removeFailed(normRoot, []string{hashes[i]})
+	res := s.uploadBatchSplit(normRoot, batch, 2)
+	if len(res.hashes) > 0 {
+		s.removeFailed(normRoot, res.hashes)
 	}
-	if failedCount > 0 {
-		s.opLog.Warnf(OpUpload, normRoot, "batch retry: %d succeeded, %d failed", len(uploaded), failedCount)
+	if len(res.failed) > 0 {
+		s.opLog.Warnf(OpUpload, normRoot, "fallback complete: %d succeeded, %d failed", len(res.hashes), len(res.failed))
+	} else {
+		s.opLog.Infof(OpUpload, normRoot, "fallback complete: %d succeeded, 0 failed", len(res.hashes))
 	}
-	return uploadResult{hashes: uploaded}
+	return uploadResult{hashes: res.hashes, failed: res.failed}
 }
 
 func (s *Service) isAllowedTextExt(path string) bool {
@@ -1122,6 +1353,14 @@ func (s *Service) collectFileBlobs(projectRoot string, relPath string) ([]blob, 
 		maxLines = 800
 	}
 	lines := strings.Split(content, "\n")
+	if maxBytes := s.cfg.MaxLineBytes; maxBytes > 0 {
+		for i, line := range lines {
+			if len(line) > maxBytes {
+				s.opLog.Warnf(OpCollect, s.normalizePath(projectRoot), "skipped %s: line %d too long (%d > %d)", relPath, i+1, len(line), maxBytes)
+				return nil, nil
+			}
+		}
+	}
 	if len(lines) <= maxLines {
 		return []blob{{Path: relPath, Content: content}}, nil
 	}

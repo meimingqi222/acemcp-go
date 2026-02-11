@@ -101,6 +101,16 @@ func NewHTTPServer(cfg *config.Config, st *state.State, idx *indexer.Service, lo
 		_ = json.NewEncoder(w).Encode(idx.Metrics())
 	}))
 
+	mux.HandleFunc("/token-check", withOptionalAuth(cfg.HTTPToken, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"time":   time.Now().UTC().Format(time.RFC3339),
+			"base":   cfg.BaseURL,
+			"remote": idx.CheckToken(r.Context()),
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+
 	mux.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Support ?after=ID for incremental fetching

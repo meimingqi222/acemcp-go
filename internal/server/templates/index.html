@@ -78,6 +78,22 @@
                         <span class="font-medium text-gray-700" x-text="t('max_lines')"></span>
                         <span class="text-gray-600" x-text="config.maxln"></span>
                     </div>
+                    <div class="flex justify-between border-b pb-2 items-center">
+                        <span class="font-medium text-gray-700" x-text="t('token_check')"></span>
+                        <div class="flex items-center gap-2">
+                            <button @click="checkToken()" class="px-2 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-xs" :disabled="tokenCheckLoading" x-text="tokenCheckLoading ? '...' : t('token_check_btn')"></button>
+                            <template x-if="tokenCheck">
+                                <span class="text-xs" :class="tokenCheck?.remote?.ok ? 'text-green-600' : 'text-red-600'" x-text="tokenCheck?.remote?.ok ? t('token_ok') : t('token_fail')"></span>
+                            </template>
+                        </div>
+                    </div>
+                    <div x-show="tokenCheck" class="space-y-1">
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500" x-text="t('token_remote')"></span>
+                            <span class="text-gray-600" x-text="(tokenCheck?.remote?.status_code ? ('HTTP ' + tokenCheck.remote.status_code) : '') + (tokenCheck?.remote?.request_id ? (' / ' + tokenCheck.remote.request_id) : '')"></span>
+                        </div>
+                        <div class="text-xs text-red-600" x-show="tokenCheck?.remote && !tokenCheck.remote.ok && tokenCheck.remote.error" x-text="tokenCheck.remote.error"></div>
+                    </div>
                     <div class="flex justify-between">
                         <span class="font-medium text-gray-700" x-text="t('version')"></span>
                         <span class="text-gray-600" x-text="config.ver"></span>
@@ -171,7 +187,7 @@
                     <div class="mb-1 flex flex-wrap">
                         <span class="text-gray-500 mr-2" x-text="formatLogTime(log.time)"></span>
                         <span class="mr-2" :class="log.type === 'index' ? 'text-blue-400' : log.type === 'search' ? 'text-yellow-400' : 'text-purple-400'" x-text="'[' + log.type.toUpperCase() + ']'"></span>
-                        <span class="text-green-400 mr-2" x-text="log.message"></span>
+                        <span class="mr-2" :class="log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-300' : log.level === 'debug' ? 'text-gray-400' : 'text-green-400'" x-text="log.message"></span>
                         <template x-if="log.duration_ms > 0">
                             <span class="text-cyan-400" x-text="log.duration_ms + 'ms'"></span>
                         </template>
@@ -207,6 +223,11 @@
                 base_url: 'Base URL',
                 batch_size: 'Batch Size',
                 max_lines: 'Max Lines/Blob',
+                token_check: 'Token Check',
+                token_check_btn: 'Check',
+                token_remote: 'Remote',
+                token_ok: 'OK',
+                token_fail: 'Fail',
                 version: 'Version',
                 metrics: 'Metrics',
                 index_runs: 'Index Runs',
@@ -242,6 +263,11 @@
                 base_url: '基础 URL',
                 batch_size: '批量大小',
                 max_lines: '最大行数/块',
+                token_check: 'Token 验证',
+                token_check_btn: '验证',
+                token_remote: '远端',
+                token_ok: '可用',
+                token_fail: '失败',
                 version: '版本',
                 metrics: '指标',
                 index_runs: '索引次数',
@@ -307,6 +333,21 @@
                         this.config = data.data || {};
                     } catch (e) {
                         console.error('Failed to load status:', e);
+                    }
+                },
+
+                tokenCheck: null,
+                tokenCheckLoading: false,
+
+                async checkToken() {
+                    this.tokenCheckLoading = true;
+                    try {
+                        const response = await fetch('/token-check');
+                        this.tokenCheck = await response.json();
+                    } catch (e) {
+                        this.tokenCheck = { remote: { ok: false, error: String(e) } };
+                    } finally {
+                        this.tokenCheckLoading = false;
                     }
                 },
 
