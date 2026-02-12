@@ -69,6 +69,7 @@ download_binary() {
     local version=$1
     local platform=$2
     local base_url="https://github.com/$REPO/releases/download/$version"
+    local temp_dir=$(mktemp -d)
     
     echo -e "${GREEN}Downloading acemcp-go $version for $platform...${NC}"
     
@@ -76,33 +77,70 @@ download_binary() {
     mkdir -p "$BIN_DIR"
     mkdir -p "$CONFIG_DIR"
     
-    # Download daemon
+    # Download daemon to temp dir
     local daemon_file="acemcp-go-daemon-${platform}"
     if [[ "$platform" == *"windows"* ]]; then
         daemon_file="${daemon_file}.exe"
     fi
     
     if command -v curl >/dev/null 2>&1; then
-        curl -L "$base_url/$daemon_file" -o "$BIN_DIR/acemcp-go-daemon"
+        curl -L "$base_url/$daemon_file" -o "$temp_dir/acemcp-go-daemon"
     else
-        wget -O "$BIN_DIR/acemcp-go-daemon" "$base_url/$daemon_file"
+        wget -O "$temp_dir/acemcp-go-daemon" "$base_url/$daemon_file"
     fi
     
-    # Download mcp server
+    # Download mcp server to temp dir
     local mcp_file="acemcp-go-mcp-${platform}"
     if [[ "$platform" == *"windows"* ]]; then
         mcp_file="${mcp_file}.exe"
     fi
     
     if command -v curl >/dev/null 2>&1; then
-        curl -L "$base_url/$mcp_file" -o "$BIN_DIR/acemcp-go-mcp"
+        curl -L "$base_url/$mcp_file" -o "$temp_dir/acemcp-go-mcp"
     else
-        wget -O "$BIN_DIR/acemcp-go-mcp" "$base_url/$mcp_file"
+        wget -O "$temp_dir/acemcp-go-mcp" "$base_url/$mcp_file"
     fi
     
     # Make executable
-    chmod +x "$BIN_DIR/acemcp-go-daemon"
-    chmod +x "$BIN_DIR/acemcp-go-mcp"
+    chmod +x "$temp_dir/acemcp-go-daemon"
+    chmod +x "$temp_dir/acemcp-go-mcp"
+    
+    echo -e "${GREEN}Download complete, installing...${NC}"
+    
+    # Wait and replace daemon
+    local max_wait=10
+    while [ $max_wait -gt 0 ]; do
+        if mv "$temp_dir/acemcp-go-daemon" "$BIN_DIR/acemcp-go-daemon" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        max_wait=$((max_wait - 1))
+        if [ $max_wait -eq 0 ]; then
+            echo -e "${RED}Failed to replace daemon, file still in use${NC}"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
+    done
+    
+    # Wait and replace mcp
+    max_wait=10
+    while [ $max_wait -gt 0 ]; do
+        if mv "$temp_dir/acemcp-go-mcp" "$BIN_DIR/acemcp-go-mcp" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        max_wait=$((max_wait - 1))
+        if [ $max_wait -eq 0 ]; then
+            echo -e "${RED}Failed to replace mcp, file still in use${NC}"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
+    done
+    
+    # Cleanup temp dir
+    rm -rf "$temp_dir"
+    
+    echo -e "${GREEN}Installation complete${NC}"
 }
 
 # Create config file
