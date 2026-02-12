@@ -190,8 +190,18 @@ function Main {
         $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
         if ($running) {
             Write-Host "  Stopping $proc..."
-            Stop-Process -Name $proc -Force
-            Start-Sleep -Milliseconds 500
+            Stop-Process -Name $proc -Force -ErrorAction SilentlyContinue
+            # Wait for process to fully exit
+            $waited = 0
+            while ((Get-Process -Name $proc -ErrorAction SilentlyContinue) -and $waited -lt 3000) {
+                Start-Sleep -Milliseconds 100
+                $waited += 100
+            }
+            # Force kill if still running
+            if (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
+                Stop-Process -Name $proc -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 500
+            }
         }
     }
     
