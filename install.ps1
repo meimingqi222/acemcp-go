@@ -58,38 +58,87 @@ function Invoke-BinaryDownload {
     
     $baseUrl = "https://github.com/meimingqi222/acemcp-go/releases/download/$Version"
     $binDir = Join-Path $InstallDir "bin"
+    $tempDir = Join-Path $env:TEMP "acemcp-update-$(Get-Random)"
     
     Write-ColorOutput "Downloading acemcp-go $Version for $Platform..." "Green"
     
     # Create directories
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
     
-    # Download daemon
+    # Download daemon to temp dir
     $daemonFile = "acemcp-go-daemon-$Platform.exe"
-    $daemonPath = Join-Path $binDir "acemcp-go-daemon.exe"
+    $tempDaemonPath = Join-Path $tempDir "acemcp-go-daemon.exe"
     
     try {
-        Invoke-WebRequest -Uri "$baseUrl/$daemonFile" -OutFile $daemonPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$baseUrl/$daemonFile" -OutFile $tempDaemonPath -UseBasicParsing
     }
     catch {
         Write-ColorOutput "Failed to download daemon: $_" "Red"
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         exit 1
     }
     
-    # Download mcp server
+    # Download mcp server to temp dir
     $mcpFile = "acemcp-go-mcp-$Platform.exe"
-    $mcpPath = Join-Path $binDir "acemcp-go-mcp.exe"
+    $tempMcpPath = Join-Path $tempDir "acemcp-go-mcp.exe"
     
     try {
-        Invoke-WebRequest -Uri "$baseUrl/$mcpFile" -OutFile $mcpPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$baseUrl/$mcpFile" -OutFile $tempMcpPath -UseBasicParsing
     }
     catch {
         Write-ColorOutput "Failed to download MCP server: $_" "Red"
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         exit 1
     }
     
-    Write-ColorOutput "Download complete" "Green"
+    Write-ColorOutput "Download complete, installing..." "Green"
+    
+    # Wait for processes to exit and install
+    $daemonPath = Join-Path $binDir "acemcp-go-daemon.exe"
+    $mcpPath = Join-Path $binDir "acemcp-go-mcp.exe"
+    
+    # Wait and replace daemon
+    $maxWait = 10
+    while ($maxWait -gt 0) {
+        try {
+            Move-Item -Path $tempDaemonPath -Destination $daemonPath -Force -ErrorAction Stop
+            break
+        }
+        catch {
+            Start-Sleep -Seconds 1
+            $maxWait--
+            if ($maxWait -eq 0) {
+                Write-ColorOutput "Failed to replace daemon, file still in use: $_" "Red"
+                Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                exit 1
+            }
+        }
+    }
+    
+    # Wait and replace mcp
+    $maxWait = 10
+    while ($maxWait -gt 0) {
+        try {
+            Move-Item -Path $tempMcpPath -Destination $mcpPath -Force -ErrorAction Stop
+            break
+        }
+        catch {
+            Start-Sleep -Seconds 1
+            $maxWait--
+            if ($maxWait -eq 0) {
+                Write-ColorOutput "Failed to replace mcp, file still in use: $_" "Red"
+                Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                exit 1
+            }
+        }
+    }
+    
+    # Cleanup temp dir
+    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    
+    Write-ColorOutput "Installation complete" "Green"
 }
 
 # Create configuration
