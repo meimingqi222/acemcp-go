@@ -901,6 +901,100 @@ func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool 
 	return false
 }
 
+// waitForBlobsIndexedOptimized waits for blobs with sampling for large sets.
+// For large projects, only checks a random sample of blobs instead of all.
+// This significantly reduces API calls and CPU usage while still ensuring
+// the majority of blobs are indexed.
+func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []string, isIncremental bool) bool {
+	if len(blobNames) == 0 {
+		return true
+	}
+
+	// For small sets, use full check
+	if len(blobNames) <= 100 {
+		return s.waitForBlobsIndexed(normRoot, blobNames)
+	}
+
+	// For larger sets, sample 100 blobs for incremental updates
+	// (faster, acceptable for small % of changes)
+	// For initial index, sample more aggressively but still check
+	sampleSize := 100
+	if isIncremental && len(blobNames) > sampleSize {
+		sampleSize = min(100, len(blobNames)/10+10) // 10% + 10, max 100
+	}
+
+	// Simple deterministic sampling: pick every N-th blob
+	step := len(blobNames) / sampleSize
+	if step < 1 {
+		step = 1
+	}
+
+	sampled := make([]string, 0, sampleSize)
+	for i := 0; i < len(blobNames) && len(sampled) < sampleSize; i += step {
+		sampled = append(sampled, blobNames[i])
+	}
+
+	// Use shorter timeout for incremental updates
+	maxWait := 30 * time.Second
+	if !isIncremental {
+		maxWait = 60 * time.Second
+	}
+	pollInterval := 2 * time.Second
+	elapsed := time.Duration(0)
+	lastNonindexed := -1
+	stableCount := 0
+
+	s.opLog.Infof(OpSearch, normRoot, "waiting for %d blobs (sampled from %d, incremental=%v)",
+		len(sampled), len(blobNames), isIncremental)
+
+	for elapsed < maxWait {
+		time.Sleep(pollInterval)
+		elapsed += pollInterval
+
+		res, err := s.findMissing(sampled)
+		if err != nil {
+			s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			continue
+		}
+
+		nonindexed := len(res.NonindexedBlobNames)
+		unknown := len(res.UnknownBlobNames)
+
+		// Sample is ready if all sampled blobs are indexed
+		if nonindexed == 0 && unknown == 0 {
+			s.opLog.Infof(OpSearch, normRoot, "sampled blobs indexed after %v", elapsed)
+			return true
+		}
+
+		// For incremental updates, allow up to 5% failure in sample
+		failureRate := float64(nonindexed+unknown) / float64(len(sampled))
+		if isIncremental && failureRate <= 0.05 && stableCount >= 2 {
+			s.opLog.Infof(OpSearch, normRoot, "incremental index mostly ready: %.1f%% not indexed, proceeding",
+				failureRate*100)
+			return true
+		}
+
+		s.opLog.Debug(OpSearch, normRoot, fmt.Sprintf("waiting for index: %d nonindexed, %d unknown (sample %d/%d)",
+			nonindexed, unknown, len(sampled), len(blobNames)))
+
+		if nonindexed == lastNonindexed {
+			stableCount++
+		} else {
+			stableCount = 0
+			lastNonindexed = nonindexed
+		}
+	}
+
+	// Timeout - for incremental, proceed anyway with warning
+	if isIncremental {
+		s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for incremental index after %v, proceeding anyway", maxWait)
+		return true
+	}
+
+	s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for blobs to be indexed after %v", maxWait)
+	return false
+}
+
 type apiHTTPError struct {
 	StatusCode int
 	Body       string
@@ -1707,7 +1801,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	s.metricsMu.Unlock()
 
 	normRoot := s.normalizePath(projectRoot)
-	s.opLog.Infof(OpSearch, normRoot, "search started: %s", truncateQuery(query, 80))
+	s.opLog.Infof(OpSearch, normRoot, "search started: %s", query)
 	s.StartWatching(projectRoot)
 
 	s.opMu.Lock()
@@ -1719,6 +1813,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	}
 	indexStart := time.Now()
 	justIndexed := false
+	hasPendingChanges := false // track if there are pending file changes
 	var childProjects []string
 	var useChildAggregation bool
 
@@ -1769,7 +1864,11 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 
 		childProjects = indexedChildren
 		useChildAggregation = true
-		s.flushPendingChanges(normRoot)
+		pendingChanges := s.flushPendingChanges(normRoot)
+		hasPendingChanges = pendingChanges > 0
+		if hasPendingChanges {
+			s.opLog.Infof(OpSearch, normRoot, "detected %d pending file changes, waiting for indexing", pendingChanges)
+		}
 	} else if len(projects[normRoot]) == 0 {
 		// No child projects and this path not indexed - index this path
 		s.opLog.Info(OpSearch, normRoot, "project not indexed, starting initial index")
@@ -1780,8 +1879,14 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		justIndexed = true
 	} else {
 		// This path is indexed and has no child projects
-		s.flushPendingChanges(normRoot)
+		// Flush any pending changes and track if there are new files
+		pendingChanges := s.flushPendingChanges(normRoot)
+		hasPendingChanges = pendingChanges > 0
+
+		// Trigger async incremental scan to detect new/modified files
 		go s.incrementalScan(projectRoot, normRoot)
+
+		// Note: don't wait here, will wait after getting blob names
 	}
 	indexMs = time.Since(indexStart).Milliseconds()
 
@@ -1851,9 +1956,16 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 
 	s.opLog.Infof(OpSearch, normRoot, "calling search API with %d blobs", len(blobNames))
 
-	// Wait for remote index to be ready after initial indexing using find-missing API
+	// Wait for remote index to be ready using optimized polling
+	// - Initial index (justIndexed): wait for all blobs, up to 60s
+	// - Incremental updates (hasPendingChanges): sample-based check, up to 30s
+	// - Normal search: no wait needed
 	if justIndexed {
+		// First-time index: wait for all blobs
 		s.waitForBlobsIndexed(normRoot, blobNames)
+	} else if hasPendingChanges {
+		// Has pending changes: use optimized sampling for faster response
+		s.waitForBlobsIndexedOptimized(normRoot, blobNames, true)
 	}
 
 	payload := map[string]any{
@@ -1950,7 +2062,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 
 	duration := time.Since(startTime)
 	s.opLog.Log(OpSearch, normRoot,
-		fmt.Sprintf("search: %s", truncateQuery(query, 50)),
+		fmt.Sprintf("search: %s", query),
 		duration, true, "", LogEntry{IndexMs: indexMs, ApiMs: apiMs})
 
 	return &SearchResult{
@@ -1958,13 +2070,6 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		Message: "search completed",
 		Output:  res.Formatted,
 	}, nil
-}
-
-func truncateQuery(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 // Metrics returns basic in-memory counters.
@@ -2191,7 +2296,7 @@ func (s *Service) processPendingChanges(key string) {
 	}
 }
 
-func (s *Service) flushPendingChanges(key string) {
+func (s *Service) flushPendingChanges(key string) (pendingUpserts int) {
 	s.mu.Lock()
 	if t, ok := s.debounceTimers[key]; ok {
 		t.Stop()
@@ -2201,8 +2306,10 @@ func (s *Service) flushPendingChanges(key string) {
 	delete(s.pending, key)
 	s.mu.Unlock()
 	if pc == nil {
-		return
+		return 0
 	}
+
+	pendingUpserts = len(pc.upsert)
 
 	upserts := make([]string, 0, len(pc.upsert))
 	for p := range pc.upsert {
@@ -2215,6 +2322,8 @@ func (s *Service) flushPendingChanges(key string) {
 	if err := s.ApplyFileChanges(pc.projectRoot, upserts, deletes); err != nil {
 		s.logger.Warn("apply file changes failed", logging.Error(err))
 	}
+
+	return pendingUpserts
 }
 
 // StopWatching stops watcher for a project.

@@ -17,7 +17,6 @@ import (
 	"github.com/meimingqi222/acemcp-go/internal/rpc"
 	"github.com/meimingqi222/acemcp-go/internal/server"
 	"github.com/meimingqi222/acemcp-go/internal/state"
-	"github.com/meimingqi222/acemcp-go/internal/version"
 )
 
 func main() {
@@ -175,54 +174,6 @@ func watchConfig(cfg *config.Config, idx *indexer.Service, logger *logging.Logge
 				return
 			}
 			logger.Warn("config watcher error", logging.Error(err))
-		}
-	}
-}
-
-// startUpdateChecker 启动后台自动更新检查
-func startUpdateChecker(logger *logging.Logger) {
-	// 延迟 1 分钟后首次检查，避免启动时网络拥堵
-	time.Sleep(1 * time.Minute)
-
-	checker := version.NewUpdateChecker("meimingqi222/acemcp-go", version.DefaultCheckInterval)
-
-	// 设置更新回调
-	checker.SetUpdateHandler(func(newVersion, downloadURL string) {
-		logger.Info("new version available",
-			logging.String("current", version.Version),
-			logging.String("latest", newVersion),
-			logging.String("download_url", downloadURL),
-		)
-	})
-
-	// 立即执行首次检查
-	result, err := checker.CheckNow()
-	if err != nil {
-		logger.Warn("initial update check failed", logging.Error(err))
-	} else if result.HasUpdate {
-		logger.Info("update available",
-			logging.String("current", result.CurrentVersion),
-			logging.String("latest", result.LatestVersion),
-		)
-	} else {
-		logger.Debug("no update available", logging.String("version", result.CurrentVersion))
-	}
-
-	// 启动定时检查循环
-	ticker := time.NewTicker(version.DefaultCheckInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		result, err := checker.CheckNow()
-		if err != nil {
-			logger.Warn("periodic update check failed", logging.Error(err))
-			continue
-		}
-		if result.HasUpdate {
-			logger.Info("update available",
-				logging.String("current", result.CurrentVersion),
-				logging.String("latest", result.LatestVersion),
-			)
 		}
 	}
 }

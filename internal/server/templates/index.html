@@ -397,11 +397,12 @@
                         const response = await fetch('/logs?after=' + this.lastLogId);
                         const newLogs = await response.json();
                         if (newLogs && newLogs.length > 0) {
-                            this.logs = [...newLogs.reverse(), ...this.logs];
+                            // newLogs is already in reverse order (newest first) from backend
+                            this.logs = [...newLogs, ...this.logs];
                             if (this.logs.length > 100) {
                                 this.logs = this.logs.slice(0, 100);
                             }
-                            this.lastLogId = newLogs[newLogs.length - 1].id;
+                            this.lastLogId = newLogs[0].id;
                             this.scrollLogsToBottom();
                         }
                     } catch (e) {

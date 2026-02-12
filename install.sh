@@ -17,6 +17,22 @@ INSTALL_DIR="$HOME/.acemcp"
 BIN_DIR="$INSTALL_DIR/bin"
 CONFIG_DIR="$HOME/.acemcp"
 
+# Stop existing processes before updating
+echo "Stopping existing acemcp processes..."
+for proc in acemcp-go-daemon acemcp-go-mcp; do
+    pids=$(pgrep -f "$proc" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "  Stopping $proc..."
+        kill -TERM $pids 2>/dev/null || true
+        sleep 1
+        # Force kill if still running
+        remaining=$(pgrep -f "$proc" 2>/dev/null || true)
+        if [ -n "$remaining" ]; then
+            kill -KILL $remaining 2>/dev/null || true
+        fi
+    fi
+done
+
 # Detect platform
 detect_platform() {
     local os=$(uname -s | tr '[:upper:]' '[:lower:]')

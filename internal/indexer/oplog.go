@@ -203,15 +203,27 @@ func (l *OpLogger) RecentByLevel(n int, minLevel LogLevel) []OpLog {
 }
 
 // Since returns logs since a given ID (for incremental fetching).
+// Returns logs in reverse order (newest first), same as Recent().
 func (l *OpLogger) Since(afterID int64) []OpLog {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	// Collect matching logs
 	var result []OpLog
 	for _, log := range l.logs {
 		if log.ID > afterID {
 			result = append(result, log)
 		}
+	}
+
+	// Reverse to get newest first (same as Recent())
+	if len(result) <= 1 {
+		return result
+	}
+
+	// Reverse in place
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
 	}
 	return result
 }

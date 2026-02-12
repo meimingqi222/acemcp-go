@@ -183,6 +183,18 @@ function Main {
     Write-ColorOutput "[acemcp-go] quick installer" "Green"
     Write-Host ""
     
+    # Stop existing processes before updating
+    Write-ColorOutput "Stopping existing acemcp processes..." "Yellow"
+    $processes = @("acemcp-go-daemon", "acemcp-go-mcp")
+    foreach ($proc in $processes) {
+        $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
+        if ($running) {
+            Write-Host "  Stopping $proc..."
+            Stop-Process -Name $proc -Force
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    
     # Detect platform
     $platform = Get-Platform
     Write-ColorOutput "Detected platform: $platform" "Green"

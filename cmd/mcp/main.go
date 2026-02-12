@@ -85,7 +85,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync() //nolint:errcheck
-	logger.Info("acemcp-go mcp proxy starting")
+	logger.Info("acemcp-go mcp proxy starting",
+		logging.String("version", version.Version),
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
