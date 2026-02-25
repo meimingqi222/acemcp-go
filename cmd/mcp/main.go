@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,8 +53,15 @@ type tool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
+type clientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 type initializeParams struct {
-	ProtocolVersion string `json:"protocolVersion"`
+	ProtocolVersion string         `json:"protocolVersion"`
+	ClientInfo      clientInfo     `json:"clientInfo"`
+	Capabilities    map[string]any `json:"capabilities"`
 }
 
 type toolsListParams struct {
@@ -68,6 +78,13 @@ type daemonSearchResult struct {
 	Message string `json:"message"`
 	Output  string `json:"output,omitempty"`
 }
+
+type transportMode int
+
+const (
+	transportPlain transportMode = iota
+	transportFramed
+)
 
 func main() {
 	dataDir := flag.String("data", "", "Data directory (passed to daemon; defaults to ~/.acemcp/data)")
@@ -92,7 +109,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	dec := json.NewDecoder(bufio.NewReader(os.Stdin))
+	stdin := bufio.NewReader(os.Stdin)
+	transport := detectTransport(stdin)
+
+	var dec *json.Decoder
+	if transport == transportPlain {
+		dec = json.NewDecoder(stdin)
+	}
 	stdout := bufio.NewWriter(os.Stdout)
 	enc := json.NewEncoder(stdout)
 
@@ -104,7 +127,13 @@ func main() {
 		}
 
 		var req rpcRequest
-		if err := dec.Decode(&req); err != nil {
+		var err error
+		if transport == transportFramed {
+			err = readFramedRequest(stdin, &req)
+		} else {
+			err = dec.Decode(&req)
+		}
+		if err != nil {
 			return
 		}
 
@@ -112,17 +141,94 @@ func main() {
 			return
 		}
 
-		// Notifications have no id; per MCP we can ignore unknown notifications.
+		// Handle notifications (no ID) - some need special handling
 		if req.ID == nil {
+			switch req.Method {
+			case "initialized":
+				// initialized is a notification, no response needed
+				// just continue to next request
+			default:
+				// Unknown notification, ignore
+			}
 			continue
 		}
 
 		resp := dispatch(req, *daemonAddr, *daemonHTTP, *daemonLogLevel, *daemonPath, *dataDir, *daemonStartTimeout)
-		if err := enc.Encode(resp); err != nil {
-			return
+		if transport == transportFramed {
+			if err := writeFramedResponse(stdout, resp); err != nil {
+				return
+			}
+		} else {
+			if err := enc.Encode(resp); err != nil {
+				return
+			}
 		}
 		_ = stdout.Flush()
 	}
+}
+
+func detectTransport(reader *bufio.Reader) transportMode {
+	peek, err := reader.Peek(1)
+	if err != nil || len(peek) == 0 {
+		return transportPlain
+	}
+	if peek[0] == '{' || peek[0] == '[' {
+		return transportPlain
+	}
+	return transportFramed
+}
+
+func readFramedRequest(reader *bufio.Reader, req *rpcRequest) error {
+	contentLength := -1
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if strings.EqualFold(key, "Content-Length") {
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("invalid Content-Length")
+			}
+			contentLength = n
+		}
+	}
+
+	if contentLength <= 0 {
+		return fmt.Errorf("missing Content-Length")
+	}
+
+	body := make([]byte, contentLength)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return err
+	}
+
+	return json.Unmarshal(body, req)
+}
+
+func writeFramedResponse(writer *bufio.Writer, resp rpcResponse) error {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
+		return err
+	}
+	if _, err := writer.Write(body); err != nil {
+		return err
+	}
+	return nil
 }
 
 func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, startTimeout time.Duration) rpcResponse {
@@ -136,8 +242,14 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 	case "initialize":
 		var p initializeParams
 		_ = json.Unmarshal(req.Params, &p)
+		// Support protocol version negotiation
+		// Codex rmcp_client expects 2024-11-05
 		pv := p.ProtocolVersion
-		if pv == "" {
+		switch pv {
+		case "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25":
+			// Use client's requested version
+		default:
+			// Default to 2024-11-05 for maximum compatibility
 			pv = "2024-11-05"
 		}
 		resp.Result = map[string]any{
@@ -154,9 +266,7 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 		}
 		return resp
 
-	case "initialized":
-		resp.Result = map[string]any{}
-		return resp
+	// Note: "initialized" is a notification (no ID) and is handled in the main loop
 
 	case "shutdown":
 		resp.Result = map[string]any{}
