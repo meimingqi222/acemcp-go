@@ -155,13 +155,13 @@ type Service struct {
 	gitignores     map[string]*gitignoreEntry // per-project gitignore
 	allowedExts    map[string]struct{}        // precompiled extension set
 
-	cacheMu      sync.RWMutex
-	projects     map[string][]string         // in-memory cache
-	filesIdx     filesIndex                  // in-memory cache
-	failed       map[string][]failedBlob     // in-memory cache
-	cacheLoaded  bool
-	cacheDirty   bool
-	flushTimer   *time.Timer
+	cacheMu     sync.RWMutex
+	projects    map[string][]string     // in-memory cache
+	filesIdx    filesIndex              // in-memory cache
+	failed      map[string][]failedBlob // in-memory cache
+	cacheLoaded bool
+	cacheDirty  bool
+	flushTimer  *time.Timer
 
 	metricsMu      sync.Mutex
 	indexRuns      int
@@ -273,10 +273,10 @@ func (s *Service) ListFailed() (map[string][]failedBlob, error) {
 
 // WatcherDiagnostics contains diagnostic information about file watchers.
 type WatcherDiagnostics struct {
-	Project      string    `json:"project"`
-	HasWatcher   bool      `json:"has_watcher"`
-	LastScanTime string    `json:"last_scan_time"`
-	ScanInterval string    `json:"scan_interval"`
+	Project      string `json:"project"`
+	HasWatcher   bool   `json:"has_watcher"`
+	LastScanTime string `json:"last_scan_time"`
+	ScanInterval string `json:"scan_interval"`
 }
 
 // GetWatcherDiagnostics returns diagnostic information about all active watchers.
@@ -737,7 +737,51 @@ type TokenRemoteCheck struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
-func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
+func (s *Service) findMissing(ctx context.Context, blobNames []string) (*findMissingResult, error) {
+	if len(blobNames) == 0 {
+		return &findMissingResult{}, nil
+	}
+
+	const maxNamesPerRequest = 500
+	if len(blobNames) <= maxNamesPerRequest {
+		return s.findMissingSingle(ctx, blobNames)
+	}
+
+	unknownSet := make(map[string]struct{})
+	nonindexedSet := make(map[string]struct{})
+	for start := 0; start < len(blobNames); start += maxNamesPerRequest {
+		end := start + maxNamesPerRequest
+		if end > len(blobNames) {
+			end = len(blobNames)
+		}
+		part, err := s.findMissingSingle(ctx, blobNames[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range part.UnknownBlobNames {
+			unknownSet[n] = struct{}{}
+		}
+		for _, n := range part.NonindexedBlobNames {
+			nonindexedSet[n] = struct{}{}
+		}
+	}
+
+	out := &findMissingResult{
+		UnknownBlobNames:    make([]string, 0, len(unknownSet)),
+		NonindexedBlobNames: make([]string, 0, len(nonindexedSet)),
+	}
+	for _, n := range blobNames {
+		if _, ok := unknownSet[n]; ok {
+			out.UnknownBlobNames = append(out.UnknownBlobNames, n)
+		}
+		if _, ok := nonindexedSet[n]; ok {
+			out.NonindexedBlobNames = append(out.NonindexedBlobNames, n)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) findMissingSingle(ctx context.Context, blobNames []string) (*findMissingResult, error) {
 	payload := map[string]any{
 		"mem_object_names": blobNames,
 	}
@@ -747,7 +791,7 @@ func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
 		return nil, fmt.Errorf("invalid base_url: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -758,15 +802,25 @@ func (s *Service) findMissing(blobNames []string) (*findMissingResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("find-missing failed: %s", string(b))
+
+	reqID := resp.Header.Get("x-request-id")
+	if reqID == "" {
+		reqID = resp.Header.Get("x-amzn-requestid")
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limited := io.LimitReader(resp.Body, 16*1024)
+		b, _ := io.ReadAll(limited)
+		_ = resp.Body.Close()
+		return nil, &apiHTTPError{Operation: "find-missing", StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
+	}
+
 	var res findMissingResult
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		_ = resp.Body.Close()
 		return nil, err
 	}
+	_ = resp.Body.Close()
 	return &res, nil
 }
 
@@ -862,6 +916,8 @@ func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool 
 	elapsed := time.Duration(0)
 	lastNonindexed := -1
 	stableCount := 0
+	errCount := 0
+	var lastErr error
 
 	s.opLog.Infof(OpSearch, normRoot, "waiting for %d blobs to be indexed", len(blobNames))
 
@@ -869,9 +925,15 @@ func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool 
 		time.Sleep(pollInterval)
 		elapsed += pollInterval
 
-		res, err := s.findMissing(blobNames)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		res, err := s.findMissing(ctx, blobNames)
+		cancel()
 		if err != nil {
-			s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			errCount++
+			lastErr = err
+			if errCount <= 3 || errCount%5 == 0 {
+				s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			}
 			continue
 		}
 
@@ -898,6 +960,9 @@ func (s *Service) waitForBlobsIndexed(normRoot string, blobNames []string) bool 
 	}
 
 	s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for blobs to be indexed after %v", maxWait)
+	if lastErr != nil {
+		s.opLog.Warnf(OpSearch, normRoot, "last find-missing error: %v", lastErr)
+	}
 	return false
 }
 
@@ -943,6 +1008,8 @@ func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []stri
 	elapsed := time.Duration(0)
 	lastNonindexed := -1
 	stableCount := 0
+	errCount := 0
+	var lastErr error
 
 	s.opLog.Infof(OpSearch, normRoot, "waiting for %d blobs (sampled from %d, incremental=%v)",
 		len(sampled), len(blobNames), isIncremental)
@@ -951,9 +1018,15 @@ func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []stri
 		time.Sleep(pollInterval)
 		elapsed += pollInterval
 
-		res, err := s.findMissing(sampled)
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		res, err := s.findMissing(ctx, sampled)
+		cancel()
 		if err != nil {
-			s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			errCount++
+			lastErr = err
+			if errCount <= 2 || errCount%5 == 0 {
+				s.opLog.Warnf(OpSearch, normRoot, "find-missing failed: %v", err)
+			}
 			continue
 		}
 
@@ -988,14 +1061,21 @@ func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []stri
 	// Timeout - for incremental, proceed anyway with warning
 	if isIncremental {
 		s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for incremental index after %v, proceeding anyway", maxWait)
+		if lastErr != nil {
+			s.opLog.Warnf(OpSearch, normRoot, "last find-missing error: %v", lastErr)
+		}
 		return true
 	}
 
 	s.opLog.Warnf(OpSearch, normRoot, "timeout waiting for blobs to be indexed after %v", maxWait)
+	if lastErr != nil {
+		s.opLog.Warnf(OpSearch, normRoot, "last find-missing error: %v", lastErr)
+	}
 	return false
 }
 
 type apiHTTPError struct {
+	Operation  string
 	StatusCode int
 	Body       string
 	RequestID  string
@@ -1006,10 +1086,14 @@ func (e *apiHTTPError) Error() string {
 	if len(body) > 1024 {
 		body = body[:1024]
 	}
-	if e.RequestID != "" {
-		return fmt.Sprintf("upload failed (status %d, request_id %s): %s", e.StatusCode, e.RequestID, body)
+	op := strings.TrimSpace(e.Operation)
+	if op == "" {
+		op = "request"
 	}
-	return fmt.Sprintf("upload failed (status %d): %s", e.StatusCode, body)
+	if e.RequestID != "" {
+		return fmt.Sprintf("%s failed (status %d, request_id %s): %s", op, e.StatusCode, e.RequestID, body)
+	}
+	return fmt.Sprintf("%s failed (status %d): %s", op, e.StatusCode, body)
 }
 
 func statusCodeFromErr(err error) (int, bool) {
@@ -1030,7 +1114,7 @@ func retryDelay(attempt int) time.Duration {
 	if d > max {
 		d = max
 	}
-	jitter := time.Duration(time.Now().UnixNano()%int64(200*time.Millisecond))
+	jitter := time.Duration(time.Now().UnixNano() % int64(200*time.Millisecond))
 	return d + jitter
 }
 
@@ -1080,7 +1164,7 @@ func (s *Service) uploadBlobs(blobs []blob) ([]string, error) {
 			if reqID == "" {
 				reqID = resp.Header.Get("x-amzn-requestid")
 			}
-			he := &apiHTTPError{StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
+			he := &apiHTTPError{Operation: "upload", StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
 			lastErr = he
 			retriable := resp.StatusCode == http.StatusRequestTimeout ||
 				resp.StatusCode == http.StatusTooManyRequests ||
@@ -1168,7 +1252,7 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	}
 	currentFiles := map[string]fileMetadata{}
 	currentHashes := map[string]struct{}{}
-	
+
 	// Group blobs by file to update metadata
 	blobsByFile := make(map[string][]blobWithHash)
 	for _, b := range blobs {
@@ -1185,7 +1269,7 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 		for i, b := range fblobs {
 			hashes[i] = b.Hash
 		}
-		
+
 		// Use metadata from the first chunk (all chunks have same mtime/size from processFile)
 		var mtime, size int64
 		if len(fblobs) > 0 {
@@ -1733,18 +1817,18 @@ func (s *Service) incrementalScan(projectRoot, normRoot string) {
 			return nil
 		}
 		scannedFiles++
-		
+
 		meta, exists := indexed[rel]
 		if !exists {
 			missingFiles = append(missingFiles, rel)
 			return nil
 		}
-		
+
 		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
-		
+
 		if meta.Mtime != info.ModTime().Unix() || meta.Size != info.Size() {
 			missingFiles = append(missingFiles, rel)
 		}
@@ -1962,10 +2046,16 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 	// - Normal search: no wait needed
 	if justIndexed {
 		// First-time index: wait for all blobs
-		s.waitForBlobsIndexed(normRoot, blobNames)
+		ok := s.waitForBlobsIndexedOptimized(normRoot, blobNames, false)
+		if !ok {
+			s.opLog.Warnf(OpSearch, normRoot, "remote index not ready after initial wait, proceeding with search")
+		}
 	} else if hasPendingChanges {
 		// Has pending changes: use optimized sampling for faster response
-		s.waitForBlobsIndexedOptimized(normRoot, blobNames, true)
+		ok := s.waitForBlobsIndexedOptimized(normRoot, blobNames, true)
+		if !ok {
+			s.opLog.Warnf(OpSearch, normRoot, "remote incremental index not ready after wait, proceeding with search")
+		}
 	}
 
 	payload := map[string]any{
@@ -1994,8 +2084,10 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		if err != nil {
 			return nil, fmt.Errorf("invalid base_url: %w", err)
 		}
-		req, err := http.NewRequest("POST", u.String(), bytes.NewReader(body))
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
@@ -2004,6 +2096,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 		apiStart := time.Now()
 		resp, err := s.client.Do(req)
 		if err != nil {
+			cancel()
 			s.logger.Warn("search request failed, retrying",
 				logging.Error(err),
 				logging.Int("attempt", attempt+1),
@@ -2015,20 +2108,28 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 			}
 			continue
 		}
-		defer resp.Body.Close()
+		cancel()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			b, _ := io.ReadAll(resp.Body)
-			s.opLog.Error(OpSearch, normRoot, fmt.Sprintf("search API error (HTTP %d)", resp.StatusCode), string(b))
+			limited := io.LimitReader(resp.Body, 16*1024)
+			b, _ := io.ReadAll(limited)
+			reqID := resp.Header.Get("x-request-id")
+			if reqID == "" {
+				reqID = resp.Header.Get("x-amzn-requestid")
+			}
+			_ = resp.Body.Close()
+			he := &apiHTTPError{Operation: "search", StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
+			s.opLog.Error(OpSearch, normRoot, fmt.Sprintf("search API error (HTTP %d)", resp.StatusCode), he.Error())
 			if attempt < maxRetries-1 {
 				delay := baseDelay * time.Duration(attempt+1)
 				time.Sleep(delay)
 				continue
 			}
-			return nil, fmt.Errorf("search failed: %s", string(b))
+			return nil, he
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			_ = resp.Body.Close()
 			s.opLog.Errorf(OpSearch, normRoot, "decode response failed: %v", err)
 			if attempt < maxRetries-1 {
 				delay := baseDelay * time.Duration(attempt+1)
@@ -2037,6 +2138,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 			}
 			return nil, err
 		}
+		_ = resp.Body.Close()
 		apiMs = time.Since(apiStart).Milliseconds()
 
 		// Check if result is empty (index may still be building)
