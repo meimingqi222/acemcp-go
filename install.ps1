@@ -182,49 +182,29 @@ function Add-ToPath {
 # Create launcher
 function New-Launcher {
     $binDir = Join-Path $InstallDir "bin"
-    $launcherPath = Join-Path $binDir "acemcp.bat"
-    
-    $launcherContent = @"
+
+    # Create batch launcher
+    $batPath = Join-Path $binDir "acemcp.bat"
+    $batContent = @"
 @echo off
 REM acemcp-go launcher
-
-cd /d "$binDir"
-
-REM check daemon
-tasklist /FI "IMAGENAME eq acemcp-go-daemon.exe" 2>NUL | find /I /N "acemcp-go-daemon.exe">NUL
-if errorlevel 1 (
-    echo Starting acemcp-go daemon...
-    start /B acemcp-go-daemon.exe
-    timeout /t 2 /nobreak >nul
-)
-
-REM start MCP server
+REM Note: acemcp-go-mcp will auto-start the daemon if needed
+cd /d "%~dp0"
 acemcp-go-mcp.exe %*
 "@
-    
-    $launcherContent | Out-File -FilePath $launcherPath -Encoding ASCII
-    Write-ColorOutput "Launcher created: $launcherPath" "Green"
-    
-    $binDir = Join-Path $InstallDir "bin"
-    $launcherPath = Join-Path $binDir "acemcp.ps1"
-    
-    $psLauncherContent = @"
+    $batContent | Out-File -FilePath $batPath -Encoding ASCII
+    Write-ColorOutput "Launcher created: $batPath" "Green"
+
+    # Create PowerShell launcher
+    $psPath = Join-Path $binDir "acemcp.ps1"
+    $psContent = @"
 # acemcp-go PowerShell launcher
-`$binDir = "`$env:USERPROFILE\.acemcp\bin"
-
-# Check daemon status
-`$daemon = Get-Process -Name "acemcp-go-daemon" -ErrorAction SilentlyContinue
-if (`-not `$daemon) {
-    Write-Host "Starting acemcp-go daemon..."
-    Start-Process -FilePath (Join-Path `$binDir "acemcp-go-daemon.exe") -WindowStyle Hidden
-    Start-Sleep -Seconds 2
-}
-
-# Start MCP server
+# Note: acemcp-go-mcp will auto-start the daemon if needed
+`$binDir = "$binDir"
 & (Join-Path `$binDir "acemcp-go-mcp.exe") `$args
 "@
-    
-    $psLauncherContent | Out-File -FilePath $launcherPath -Encoding UTF8
+    $psContent | Out-File -FilePath $psPath -Encoding UTF8
+    Write-ColorOutput "Launcher created: $psPath" "Green"
 }
 
 # Main

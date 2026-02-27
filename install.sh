@@ -190,19 +190,11 @@ create_launcher() {
 #!/bin/bash
 
 # acemcp-go launcher
+# Note: acemcp-go-mcp will auto-start the daemon if needed
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Check daemon status
-if ! pgrep -f "acemcp-go-daemon" > /dev/null; then
-    echo "Starting acemcp-go daemon..."
-    "$SCRIPT_DIR/acemcp-go-daemon" &
-    sleep 2
-fi
-
-# Start MCP server
 exec "$SCRIPT_DIR/acemcp-go-mcp" "$@"
 EOF
-    
+
     chmod +x "$launcher"
     echo -e "${GREEN}Launcher created: $BIN_DIR/acemcp${NC}"
 }
