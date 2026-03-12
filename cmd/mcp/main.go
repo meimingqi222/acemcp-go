@@ -242,6 +242,12 @@ func dispatch(req rpcRequest, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath
 	case "initialize":
 		var p initializeParams
 		_ = json.Unmarshal(req.Params, &p)
+		// Eagerly start daemon so it's ready before the first tool call.
+		// Without this, the first tools/call triggers daemon startup (1-5s),
+		// which can cause the agent's initialization timeout to fire and kill
+		// the MCP proxy before the tool response arrives.
+		// We ignore errors here; tools/call will surface them when invoked.
+		_ = ensureDaemon(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout)
 		// Support protocol version negotiation
 		// Codex rmcp_client expects 2024-11-05
 		pv := p.ProtocolVersion

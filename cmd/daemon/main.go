@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os/signal"
 	"syscall"
@@ -88,19 +87,15 @@ func main() {
 		}
 	}()
 
-	errCh := make(chan error, 2)
-	go func() {
-		if err := httpSrv.Start(); err != nil {
-			errCh <- fmt.Errorf("http server: %w", err)
-		}
-	}()
-	go func() {
-		if err := rpcSrv.Start(); err != nil {
-			errCh <- fmt.Errorf("rpc server: %w", err)
-		}
-	}()
+	errCh := make(chan error, 1)
+	if err := httpSrv.Start(); err != nil {
+		log.Fatalf("http server: %v", err)
+	}
+	if err := rpcSrv.Start(); err != nil {
+		log.Fatalf("rpc server: %v", err)
+	}
 
-	// Mark as ready after servers start
+	// Both servers have bound their ports; mark daemon as ready.
 	st.SetReady()
 	logger.Info("acemcp-go daemon ready")
 

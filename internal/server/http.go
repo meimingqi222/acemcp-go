@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -149,9 +150,15 @@ func NewHTTPServer(cfg *config.Config, st *state.State, idx *indexer.Service, lo
 
 func (s *HTTPServer) Start() error {
 	s.logger.Info("http server starting", logging.String("addr", s.addr))
-	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	go func() {
+		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("http server error", logging.Error(err))
+		}
+	}()
 	return nil
 }
 

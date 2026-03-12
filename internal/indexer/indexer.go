@@ -1104,6 +1104,11 @@ func statusCodeFromErr(err error) (int, bool) {
 	return 0, false
 }
 
+func isTokenError(err error) bool {
+	code, ok := statusCodeFromErr(err)
+	return ok && code == http.StatusUnauthorized
+}
+
 func retryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -1314,7 +1319,10 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 
 	s.opLog.Infof(OpUpload, normRoot, "uploading %d new blobs (existing: %d)", len(blobsToUpload), len(existing))
 
-	uploaded := s.uploadBlobsConcurrent(normRoot, blobsToUpload)
+	uploaded, uploadErr := s.uploadBlobsConcurrent(normRoot, blobsToUpload)
+	if uploadErr != nil {
+		return nil, uploadErr
+	}
 
 	if len(blobsToUpload) > 0 && len(uploaded) < len(blobsToUpload) {
 		s.opLog.Warnf(OpUpload, normRoot, "partial upload: %d/%d succeeded", len(uploaded), len(blobsToUpload))
@@ -1359,13 +1367,14 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 }
 
 type uploadResult struct {
-	hashes []string
-	failed []blobWithHash
+	hashes   []string
+	failed   []blobWithHash
+	fatalErr error // non-nil for unrecoverable errors (e.g. 401); blobs are NOT added to failed list
 }
 
-func (s *Service) uploadBlobsConcurrent(normRoot string, blobs []blobWithHash) []string {
+func (s *Service) uploadBlobsConcurrent(normRoot string, blobs []blobWithHash) ([]string, error) {
 	if len(blobs) == 0 {
-		return nil
+		return nil, nil
 	}
 	batchSize := s.cfg.BatchSize
 	if batchSize <= 0 {
@@ -1406,10 +1415,14 @@ func (s *Service) uploadBlobsConcurrent(normRoot string, blobs []blobWithHash) [
 	}()
 
 	var uploaded []string
+	var firstFatalErr error
 	for res := range resultCh {
 		uploaded = append(uploaded, res.hashes...)
+		if res.fatalErr != nil && firstFatalErr == nil {
+			firstFatalErr = res.fatalErr
+		}
 	}
-	return uploaded
+	return uploaded, firstFatalErr
 }
 
 func (s *Service) uploadBatchSplit(normRoot string, batch []blobWithHash, depth int) uploadResult {
@@ -1426,6 +1439,9 @@ func (s *Service) uploadBatchSplit(normRoot string, batch []blobWithHash, depth 
 				logging.String("path", b.Path),
 				logging.Error(err),
 			)
+			if isTokenError(err) {
+				return uploadResult{fatalErr: err, failed: []blobWithHash{b}}
+			}
 			s.addFailed(normRoot, b.Hash, b.Path, err.Error())
 			return uploadResult{failed: []blobWithHash{b}}
 		}
@@ -1455,6 +1471,9 @@ func (s *Service) uploadBatchSplit(normRoot string, batch []blobWithHash, depth 
 					logging.String("path", b.Path),
 					logging.Error(berr),
 				)
+				if isTokenError(berr) {
+					return uploadResult{fatalErr: berr, failed: append(failed, b)}
+				}
 				s.addFailed(normRoot, b.Hash, b.Path, berr.Error())
 				failed = append(failed, b)
 				continue
@@ -1466,10 +1485,14 @@ func (s *Service) uploadBatchSplit(normRoot string, batch []blobWithHash, depth 
 
 	mid := len(batch) / 2
 	left := s.uploadBatchSplit(normRoot, batch[:mid], depth-1)
+	if left.fatalErr != nil {
+		return left
+	}
 	right := s.uploadBatchSplit(normRoot, batch[mid:], depth-1)
 	return uploadResult{
-		hashes: append(left.hashes, right.hashes...),
-		failed: append(left.failed, right.failed...),
+		hashes:   append(left.hashes, right.hashes...),
+		failed:   append(left.failed, right.failed...),
+		fatalErr: right.fatalErr,
 	}
 }
 
@@ -1487,6 +1510,10 @@ func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResul
 		return uploadResult{hashes: hashes}
 	}
 
+	if isTokenError(err) {
+		return uploadResult{fatalErr: err, failed: batch}
+	}
+
 	s.opLog.Warnf(OpUpload, normRoot, "batch upload failed (%d blobs), falling back to smaller batches: %v", len(batch), err)
 	s.logger.Warn("batch upload failed, falling back to smaller batches",
 		logging.Error(err),
@@ -1496,6 +1523,9 @@ func (s *Service) uploadBatch(normRoot string, batch []blobWithHash) uploadResul
 	res := s.uploadBatchSplit(normRoot, batch, 2)
 	if len(res.hashes) > 0 {
 		s.removeFailed(normRoot, res.hashes)
+	}
+	if res.fatalErr != nil {
+		return uploadResult{hashes: res.hashes, failed: res.failed, fatalErr: res.fatalErr}
 	}
 	if len(res.failed) > 0 {
 		s.opLog.Warnf(OpUpload, normRoot, "fallback complete: %d succeeded, %d failed", len(res.hashes), len(res.failed))
@@ -1710,9 +1740,15 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 					}
 					continue
 				}
+				if isTokenError(uerr) {
+					return uerr
+				}
 				for j := i; j < end; j++ {
 					_, berr := s.uploadBlobs([]blob{toUpload[j]})
 					if berr != nil {
+						if isTokenError(berr) {
+							return berr
+						}
 						s.addFailed(normRoot, toUploadHashes[j], toUpload[j].Path, berr.Error())
 						continue
 					}
