@@ -19,7 +19,7 @@ build:
 	@echo "Version: $(VERSION), Commit: $(GIT_COMMIT)"
 	@mkdir -p dist
 	@go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon ./cmd/daemon
-	@go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp ./cmd/mcp
+	@go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go ./cmd/mcp
 	@echo "构建完成！可执行文件位于 dist/ 目录"
 
 # Windows 构建
@@ -27,7 +27,7 @@ build-windows:
 	@echo "构建 Windows 版本..."
 	@mkdir -p dist
 	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon.exe ./cmd/daemon
-	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp.exe ./cmd/mcp
+	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go.exe ./cmd/mcp
 	@echo "Windows 构建完成！"
 
 # Linux 构建
@@ -35,7 +35,7 @@ build-linux:
 	@echo "构建 Linux 版本..."
 	@mkdir -p dist
 	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-daemon-linux-amd64 ./cmd/daemon
-	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-mcp-linux-amd64 ./cmd/mcp
+	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/acemcp-go-linux-amd64 ./cmd/mcp
 	@echo "Linux 构建完成！"
 
 # 多平台构建

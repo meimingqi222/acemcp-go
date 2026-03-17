@@ -19,7 +19,7 @@ CONFIG_DIR="$HOME/.acemcp"
 
 # Stop existing processes before updating
 echo "Stopping existing acemcp processes..."
-for proc in acemcp-go-daemon acemcp-go-mcp; do
+for proc in acemcp-go-daemon acemcp-go; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         echo "  Stopping $proc..."
@@ -89,21 +89,21 @@ download_binary() {
         wget -O "$temp_dir/acemcp-go-daemon" "$base_url/$daemon_file"
     fi
     
-    # Download mcp server to temp dir
-    local mcp_file="acemcp-go-mcp-${platform}"
+    # Download main binary to temp dir
+    local main_file="acemcp-go-${platform}"
     if [[ "$platform" == *"windows"* ]]; then
-        mcp_file="${mcp_file}.exe"
+        main_file="${main_file}.exe"
     fi
     
     if command -v curl >/dev/null 2>&1; then
-        curl -L "$base_url/$mcp_file" -o "$temp_dir/acemcp-go-mcp"
+        curl -L "$base_url/$main_file" -o "$temp_dir/acemcp-go"
     else
-        wget -O "$temp_dir/acemcp-go-mcp" "$base_url/$mcp_file"
+        wget -O "$temp_dir/acemcp-go" "$base_url/$main_file"
     fi
     
     # Make executable
     chmod +x "$temp_dir/acemcp-go-daemon"
-    chmod +x "$temp_dir/acemcp-go-mcp"
+    chmod +x "$temp_dir/acemcp-go"
     
     echo -e "${GREEN}Download complete, installing...${NC}"
     
@@ -122,16 +122,16 @@ download_binary() {
         fi
     done
     
-    # Wait and replace mcp
+    # Wait and replace main binary
     max_wait=10
     while [ $max_wait -gt 0 ]; do
-        if mv "$temp_dir/acemcp-go-mcp" "$BIN_DIR/acemcp-go-mcp" 2>/dev/null; then
+        if mv "$temp_dir/acemcp-go" "$BIN_DIR/acemcp-go" 2>/dev/null; then
             break
         fi
         sleep 1
         max_wait=$((max_wait - 1))
         if [ $max_wait -eq 0 ]; then
-            echo -e "${RED}Failed to replace mcp, file still in use${NC}"
+            echo -e "${RED}Failed to replace main binary, file still in use${NC}"
             rm -rf "$temp_dir"
             exit 1
         fi
@@ -183,22 +183,6 @@ add_to_path() {
     fi
 }
 
-# Create launcher
-create_launcher() {
-    local launcher="$BIN_DIR/acemcp"
-    cat > "$launcher" << 'EOF'
-#!/bin/bash
-
-# acemcp-go launcher
-# Note: acemcp-go-mcp will auto-start the daemon if needed
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/acemcp-go-mcp" "$@"
-EOF
-
-    chmod +x "$launcher"
-    echo -e "${GREEN}Launcher created: $BIN_DIR/acemcp${NC}"
-}
-
 # Main
 main() {
     echo -e "${GREEN}[acemcp-go] quick installer${NC}"
@@ -225,26 +209,33 @@ main() {
     # Add to PATH
     add_to_path
     
-    # Create launcher
-    create_launcher
-    
     echo
     echo -e "${GREEN}[Installation complete!]${NC}"
+    echo
+    echo -e "${YELLOW}Installed binaries:${NC}"
+    echo "  $BIN_DIR/acemcp-go         (MCP server + CLI)"
+    echo "  $BIN_DIR/acemcp-go-daemon  (background daemon)"
+    echo
+    echo -e "${YELLOW}Usage:${NC}"
+    echo "  acemcp-go                          # Start MCP server (for IDE)"
+    echo "  acemcp-go search <project> <query> # CLI search"
+    echo "  acemcp-go index <project>          # CLI index"
+    echo "  acemcp-go status                   # Check daemon status"
+    echo "  acemcp-go --version                # Show version"
     echo
     echo -e "${YELLOW}Next steps:${NC}"
     echo "1. Edit configuration: $CONFIG_DIR/settings.toml"
     echo "2. Reload your shell: source $HOME/.bashrc (or equivalent)"
-    echo "3. In Cursor, configure MCP server with command: acemcp"
+    echo "3. Configure Cursor MCP server with command: acemcp-go"
     echo
     echo -e "${YELLOW}Cursor MCP configuration:${NC}"
     echo '{'
     echo '  "mcpServers": {'
     echo '    "acemcp": {'
-    echo '      "command": "acemcp"'
+    echo '      "command": "acemcp-go"'
     echo '    }'
     echo '  }'
     echo '}'
 }
 
-# 运行主函数
 main "$@"

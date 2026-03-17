@@ -94,9 +94,125 @@ func main() {
 	daemonLogLevel := flag.String("daemon-log-level", "warn", "Daemon log level: debug|info|warn|error")
 	daemonPath := flag.String("daemon-path", "", "Path to daemon executable (cmd/daemon). If empty, tries to find it next to this binary or in PATH")
 	daemonStartTimeout := flag.Duration("daemon-start-timeout", 5*time.Second, "Timeout waiting for daemon to start")
+	showVersion := flag.Bool("version", false, "Show version information")
 	flag.Parse()
 
-	logger, err := logging.NewLogger(*logLevel)
+	if *showVersion {
+		fmt.Printf("acemcp-go %s (commit: %s, built: %s)\n", version.Version, version.GitCommit, version.BuildTime)
+		os.Exit(0)
+	}
+
+	args := flag.Args()
+	if len(args) > 0 {
+		runCLI(args, *daemonAddr, *daemonHTTP, *daemonLogLevel, *daemonPath, *dataDir, *daemonStartTimeout, *logLevel)
+		return
+	}
+
+	runMCP(*daemonAddr, *daemonHTTP, *daemonLogLevel, *daemonPath, *dataDir, *daemonStartTimeout, *logLevel)
+}
+
+func runCLI(args []string, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, startTimeout time.Duration, logLevel string) {
+	logger, err := logging.NewLogger(logLevel)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "init logger:", err)
+		os.Exit(1)
+	}
+	defer logger.Sync()
+
+	cmd := args[0]
+	switch cmd {
+	case "search":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: acemcp-go search <project_root> <query>")
+			fmt.Fprintln(os.Stderr, "Example: acemcp-go search /path/to/project \"How does authentication work?\"")
+			os.Exit(1)
+		}
+		projectRoot := args[1]
+		query := strings.Join(args[2:], " ")
+
+		if err := ensureDaemon(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout); err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to start daemon:", err)
+			os.Exit(1)
+		}
+
+		raw, err := callDaemon(daemonAddr, "SearchContext", map[string]any{"project_root_path": projectRoot, "query": query})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Search failed:", err)
+			os.Exit(1)
+		}
+		var sr daemonSearchResult
+		_ = json.Unmarshal(raw, &sr)
+		if sr.Output != "" {
+			fmt.Println(sr.Output)
+		} else if sr.Message != "" {
+			fmt.Println(sr.Message)
+		} else {
+			fmt.Println(string(raw))
+		}
+
+	case "index":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: acemcp-go index <project_root>")
+			os.Exit(1)
+		}
+		projectRoot := args[1]
+
+		if err := ensureDaemon(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout); err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to start daemon:", err)
+			os.Exit(1)
+		}
+
+		raw, err := callDaemon(daemonAddr, "IndexProject", map[string]any{"project_root_path": projectRoot})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Index failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+
+	case "status":
+		if err := ensureDaemon(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout); err != nil {
+			fmt.Fprintln(os.Stderr, "Daemon not running:", err)
+			os.Exit(1)
+		}
+		raw, err := callDaemon(daemonAddr, "Status", nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Status failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+
+	case "help", "--help", "-h":
+		printCLIHelp()
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
+		printCLIHelp()
+		os.Exit(1)
+	}
+}
+
+func printCLIHelp() {
+	fmt.Println("acemcp-go - AI-powered code search and indexing tool")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  acemcp-go                           Start MCP server (for IDE integration)")
+	fmt.Println("  acemcp-go search <project> <query>  Search code using natural language")
+	fmt.Println("  acemcp-go index <project>           Index a project for searching")
+	fmt.Println("  acemcp-go status                    Show daemon status")
+	fmt.Println("  acemcp-go --version                 Show version")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  acemcp-go search /home/user/myapp \"Where is authentication handled?\"")
+	fmt.Println("  acemcp-go index /home/user/myapp")
+	fmt.Println()
+	fmt.Println("MCP Server Mode:")
+	fmt.Println("  When run without arguments, starts as an MCP server for IDE integration.")
+	fmt.Println("  Configure in Cursor settings.json:")
+	fmt.Println(`    {"mcpServers": {"acemcp": {"command": "acemcp-go"}}}`)
+}
+
+func runMCP(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, startTimeout time.Duration, logLevel string) {
+	logger, err := logging.NewLogger(logLevel)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "init logger:", err)
 		os.Exit(1)
@@ -153,7 +269,7 @@ func main() {
 			continue
 		}
 
-		resp := dispatch(req, *daemonAddr, *daemonHTTP, *daemonLogLevel, *daemonPath, *dataDir, *daemonStartTimeout)
+		resp := dispatch(req, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout)
 		if transport == transportFramed {
 			if err := writeFramedResponse(stdout, resp); err != nil {
 				return

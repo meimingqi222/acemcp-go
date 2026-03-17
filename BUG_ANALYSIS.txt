@@ -1,0 +1,46 @@
+# BUG ANALYSIS: MCP Initialization Race Condition
+
+## ROOT CAUSE: SetReady() Called Before Servers Actually Start
+
+In cmd/daemon/main.go lines 91-105, SetReady() is called IMMEDIATELY after spawning goroutines, not AFTER they complete:
+
+    go func() { httpSrv.Start() }()
+    go func() { rpcSrv.Start() }()
+    st.SetReady()  // <- RACE CONDITION: Called too early!
+
+## THE PROBLEM
+
+1. httpSrv.Start() and rpcSrv.Start() run in background goroutines
+2. Both need to call net.Listen() and bind to their TCP ports
+3. SetReady() returns immediately - servers still binding
+4. Daemon incorrectly reports 'ready' when ports aren't actually listening
+
+## IMPACT ON MCP
+
+When agent starts acemcp-go via MCP for the FIRST TIME:
+
+1. Agent sends 'initialize' -> MCP returns success (no validation)
+2. Agent sends 'tools/list' or first tool call
+3. MCP's ensureDaemon() checks if port is open (150ms timeout)
+4. Port NOT YET OPEN (goroutines still binding) -> port check fails
+5. ensureDaemon() spawns NEW daemon process
+6. Original daemon is STILL BINDING -> 'Address in use' error
+7. MCP tool call FAILS
+
+AFTER AGENT RESTART:
+- Original daemon finally bound 30+ seconds ago
+- Port is already open
+- No race condition
+- Everything works
+
+## KEY FILES
+
+daemon startup: cmd/daemon/main.go lines 91-105
+MCP initialize: cmd/mcp/main.go lines 242-267 (no validation)
+MCP ensure: cmd/mcp/main.go lines 397-431
+RPC server start: internal/rpc/rpc.go lines 69-106
+State: internal/state/state.go lines 29-31
+
+## FIX: Wait for ports to actually open before SetReady()
+
+Add polling in daemon startup to ensure both ports are listening before marking ready.

@@ -98,14 +98,14 @@ jobs:
         mkdir -p dist
         go build -ldflags="-s -w -X github.com/meimingqi222/acemcp-go/internal/version.Version=$VERSION" -o dist/acemcp-go-daemon-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/daemon
 
-    - name: Build mcp
+    - name: Build main binary
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: 0
         VERSION: ${{ steps.version.outputs.VERSION }}
       run: |
-        go build -ldflags="-s -w -X github.com/meimingqi222/acemcp-go/internal/version.Version=$VERSION" -o dist/acemcp-go-mcp-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/mcp
+        go build -ldflags="-s -w -X github.com/meimingqi222/acemcp-go/internal/version.Version=$VERSION" -o dist/acemcp-go-${{ matrix.binary_suffix }}${{ matrix.ext }} ./cmd/mcp
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -146,45 +146,57 @@ jobs:
         body: |
           ## acemcp-go ${{ github.ref_name }}
 
-          ### 🚀 Downloads
+          ### Downloads
 
           Choose the appropriate binary for your platform:
 
           **Linux:**
           - `acemcp-go-daemon-linux-amd64` - Linux x86_64
-          - `acemcp-go-mcp-linux-amd64` - Linux x86_64
+          - `acemcp-go-linux-amd64` - Linux x86_64 (MCP server + CLI)
           - `acemcp-go-daemon-linux-arm64` - Linux ARM64
-          - `acemcp-go-mcp-linux-arm64` - Linux ARM64
+          - `acemcp-go-linux-arm64` - Linux ARM64 (MCP server + CLI)
 
           **Windows:**
           - `acemcp-go-daemon-windows-amd64.exe` - Windows x86_64
-          - `acemcp-go-mcp-windows-amd64.exe` - Windows x86_64
+          - `acemcp-go-windows-amd64.exe` - Windows x86_64 (MCP server + CLI)
 
           **macOS:**
           - `acemcp-go-daemon-darwin-amd64` - macOS Intel
-          - `acemcp-go-mcp-darwin-amd64` - macOS Intel
+          - `acemcp-go-darwin-amd64` - macOS Intel (MCP server + CLI)
           - `acemcp-go-daemon-darwin-arm64` - macOS Apple Silicon
-          - `acemcp-go-mcp-darwin-arm64` - macOS Apple Silicon
+          - `acemcp-go-darwin-arm64` - macOS Apple Silicon (MCP server + CLI)
 
-          ### 📋 Verification
+          ### Verification
 
           Verify the integrity of downloaded files using the provided SHA256 checksums:
           ```bash
           sha256sum -c checksums.txt
           ```
 
-          ### 🚀 Quick Start
+          ### Quick Start
 
           1. Download the appropriate binaries for your platform
           2. Make them executable (Linux/macOS): `chmod +x acemcp-go-*`
-          3. Run the daemon: `./acemcp-go-daemon`
-          4. Use the MCP server: `./acemcp-go-mcp`
+          3. Run the MCP server: `./acemcp-go` (daemon starts automatically)
+          
+          ### CLI Usage
+          
+          ```bash
+          # Search code
+          ./acemcp-go search /path/to/project "How does authentication work?"
+          
+          # Index a project
+          ./acemcp-go index /path/to/project
+          
+          # Check status
+          ./acemcp-go status
+          ```
 
           For detailed instructions, see the [README.md](https://github.com/${{ github.repository }}/blob/main/README.md).
 
           ---
 
-          🤖 This release was automatically created.
+          This release was automatically created.
         files: |
           release/*
         draft: false

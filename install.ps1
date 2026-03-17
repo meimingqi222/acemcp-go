@@ -80,15 +80,15 @@ function Invoke-BinaryDownload {
         exit 1
     }
     
-    # Download mcp server to temp dir
-    $mcpFile = "acemcp-go-mcp-$Platform.exe"
-    $tempMcpPath = Join-Path $tempDir "acemcp-go-mcp.exe"
+    # Download main binary to temp dir
+    $mainFile = "acemcp-go-$Platform.exe"
+    $tempMainPath = Join-Path $tempDir "acemcp-go.exe"
     
     try {
-        Invoke-WebRequest -Uri "$baseUrl/$mcpFile" -OutFile $tempMcpPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$baseUrl/$mainFile" -OutFile $tempMainPath -UseBasicParsing
     }
     catch {
-        Write-ColorOutput "Failed to download MCP server: $_" "Red"
+        Write-ColorOutput "Failed to download main binary: $_" "Red"
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         exit 1
     }
@@ -97,7 +97,7 @@ function Invoke-BinaryDownload {
     
     # Wait for processes to exit and install
     $daemonPath = Join-Path $binDir "acemcp-go-daemon.exe"
-    $mcpPath = Join-Path $binDir "acemcp-go-mcp.exe"
+    $mainPath = Join-Path $binDir "acemcp-go.exe"
     
     # Wait and replace daemon
     $maxWait = 10
@@ -117,18 +117,18 @@ function Invoke-BinaryDownload {
         }
     }
     
-    # Wait and replace mcp
+    # Wait and replace main binary
     $maxWait = 10
     while ($maxWait -gt 0) {
         try {
-            Move-Item -Path $tempMcpPath -Destination $mcpPath -Force -ErrorAction Stop
+            Move-Item -Path $tempMainPath -Destination $mainPath -Force -ErrorAction Stop
             break
         }
         catch {
             Start-Sleep -Seconds 1
             $maxWait--
             if ($maxWait -eq 0) {
-                Write-ColorOutput "Failed to replace mcp, file still in use: $_" "Red"
+                Write-ColorOutput "Failed to replace main binary, file still in use: $_" "Red"
                 Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
                 exit 1
             }
@@ -179,34 +179,6 @@ function Add-ToPath {
     }
 }
 
-# Create launcher
-function New-Launcher {
-    $binDir = Join-Path $InstallDir "bin"
-
-    # Create batch launcher
-    $batPath = Join-Path $binDir "acemcp.bat"
-    $batContent = @"
-@echo off
-REM acemcp-go launcher
-REM Note: acemcp-go-mcp will auto-start the daemon if needed
-cd /d "%~dp0"
-acemcp-go-mcp.exe %*
-"@
-    $batContent | Out-File -FilePath $batPath -Encoding ASCII
-    Write-ColorOutput "Launcher created: $batPath" "Green"
-
-    # Create PowerShell launcher
-    $psPath = Join-Path $binDir "acemcp.ps1"
-    $psContent = @"
-# acemcp-go PowerShell launcher
-# Note: acemcp-go-mcp will auto-start the daemon if needed
-`$binDir = "$binDir"
-& (Join-Path `$binDir "acemcp-go-mcp.exe") `$args
-"@
-    $psContent | Out-File -FilePath $psPath -Encoding UTF8
-    Write-ColorOutput "Launcher created: $psPath" "Green"
-}
-
 # Main
 function Main {
     Write-ColorOutput "[acemcp-go] quick installer" "Green"
@@ -214,7 +186,7 @@ function Main {
     
     # Stop existing processes before updating
     Write-ColorOutput "Stopping existing acemcp processes..." "Yellow"
-    $processes = @("acemcp-go-daemon", "acemcp-go-mcp")
+    $processes = @("acemcp-go-daemon", "acemcp-go")
     foreach ($proc in $processes) {
         $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
         if ($running) {
@@ -253,22 +225,32 @@ function Main {
     # Add to PATH
     Add-ToPath
     
-    # Create launcher
-    New-Launcher
+    $binDir = Join-Path $InstallDir "bin"
     
     Write-Host ""
     Write-ColorOutput "[Installation complete!]" "Green"
     Write-Host ""
+    Write-ColorOutput "Installed binaries:" "Yellow"
+    Write-Host "  $binDir\acemcp-go.exe         (MCP server + CLI)"
+    Write-Host "  $binDir\acemcp-go-daemon.exe  (background daemon)"
+    Write-Host ""
+    Write-ColorOutput "Usage:" "Yellow"
+    Write-Host "  acemcp-go                          # Start MCP server (for IDE)"
+    Write-Host "  acemcp-go search <project> <query> # CLI search"
+    Write-Host "  acemcp-go index <project>          # CLI index"
+    Write-Host "  acemcp-go status                   # Check daemon status"
+    Write-Host "  acemcp-go --version                # Show version"
+    Write-Host ""
     Write-ColorOutput "Next steps:" "Yellow"
     Write-Host "1. Edit configuration: $InstallDir\settings.toml"
     Write-Host "2. Restart PowerShell"
-    Write-Host "3. Configure Cursor MCP server with command: acemcp"
+    Write-Host "3. Configure Cursor MCP server with command: acemcp-go"
     Write-Host ""
     Write-ColorOutput "Cursor MCP configuration:" "Yellow"
     Write-Host "{"
     Write-Host "  `"mcpServers`": {"
     Write-Host "    `"acemcp`": {"
-    Write-Host "      `"command`": `"acemcp`""
+    Write-Host "      `"command`": `"acemcp-go`""
     Write-Host "    }"
     Write-Host "  }"
     Write-Host "}"

@@ -2144,7 +2144,6 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 			}
 			continue
 		}
-		cancel()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			limited := io.LimitReader(resp.Body, 16*1024)
@@ -2154,6 +2153,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 				reqID = resp.Header.Get("x-amzn-requestid")
 			}
 			_ = resp.Body.Close()
+			cancel()
 			he := &apiHTTPError{Operation: "search", StatusCode: resp.StatusCode, Body: string(b), RequestID: reqID}
 			s.opLog.Error(OpSearch, normRoot, fmt.Sprintf("search API error (HTTP %d)", resp.StatusCode), he.Error())
 			if attempt < maxRetries-1 {
@@ -2166,6 +2166,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 
 		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 			_ = resp.Body.Close()
+			cancel()
 			s.opLog.Errorf(OpSearch, normRoot, "decode response failed: %v", err)
 			if attempt < maxRetries-1 {
 				delay := baseDelay * time.Duration(attempt+1)
@@ -2175,6 +2176,7 @@ func (s *Service) SearchContext(projectRoot, query string) (*SearchResult, error
 			return nil, err
 		}
 		_ = resp.Body.Close()
+		cancel()
 		apiMs = time.Since(apiStart).Milliseconds()
 
 		// Check if result is empty (index may still be building)

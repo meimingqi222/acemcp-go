@@ -25,5 +25,5 @@ mkdir -p dist
 # Build for current platform
 echo "Building for current platform..."
 go build -ldflags="${LDFLAGS}" -o dist/acemcp-go-daemon ./cmd/daemon
-go build -ldflags="${LDFLAGS}" -o dist/acemcp-go-mcp ./cmd/mcp
+go build -ldflags="${LDFLAGS}" -o dist/acemcp-go ./cmd/mcp
 echo "Done!"
