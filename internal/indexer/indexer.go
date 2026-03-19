@@ -1007,6 +1007,7 @@ func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []stri
 	pollInterval := 2 * time.Second
 	elapsed := time.Duration(0)
 	lastNonindexed := -1
+	lastUnknown := -1
 	stableCount := 0
 	errCount := 0
 	var lastErr error
@@ -1050,11 +1051,20 @@ func (s *Service) waitForBlobsIndexedOptimized(normRoot string, blobNames []stri
 		s.opLog.Debug(OpSearch, normRoot, fmt.Sprintf("waiting for index: %d nonindexed, %d unknown (sample %d/%d)",
 			nonindexed, unknown, len(sampled), len(blobNames)))
 
-		if nonindexed == lastNonindexed {
+		if nonindexed == lastNonindexed && unknown == lastUnknown {
 			stableCount++
+			// If nonindexed is 0 and unknown has been stable for several polls,
+			// those blobs are permanently unavailable (silent upload failure) - proceed.
+			if nonindexed == 0 && stableCount >= 3 {
+				s.opLog.Infof(OpSearch, normRoot,
+					"unknown blobs stable at %d/%d for %d polls, treating as permanent failures, proceeding",
+					unknown, len(sampled), stableCount)
+				return true
+			}
 		} else {
 			stableCount = 0
 			lastNonindexed = nonindexed
+			lastUnknown = unknown
 		}
 	}
 
