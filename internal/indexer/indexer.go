@@ -1812,9 +1812,10 @@ func (s *Service) ApplyFileChanges(projectRoot string, upserts []string, deletes
 		}
 
 		prevFiles[rel] = fileMetadata{
-			Hashes: newHashes,
-			Mtime:  info.ModTime().Unix(),
-			Size:   info.Size(),
+			Hashes:    newHashes,
+			Mtime:     info.ModTime().Unix(),
+			Size:      info.Size(),
+			Truncated: 0,
 		}
 	}
 
