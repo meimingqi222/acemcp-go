@@ -18,7 +18,7 @@ type Config struct {
 	LogLevel        string // debug|info|warn|error
 	BatchSize       int
 	MaxLinesPerBlob int
-	MaxLineBytes    int // max bytes per line, skip file if exceeded
+	MaxLineBytes    int // max bytes per line, truncate if exceeded
 	BaseURL         string
 	Token           string
 	TextExtensions  []string

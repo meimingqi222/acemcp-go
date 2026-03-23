@@ -33,9 +33,10 @@ type blob struct {
 
 type blobWithHash struct {
 	blob
-	Hash  string
-	Mtime int64
-	Size  int64
+	Hash      string
+	Mtime     int64
+	Size      int64
+	Truncated int // number of lines truncated
 }
 
 func (s *Service) removeFailed(projectPath string, hashes []string) {
@@ -232,9 +233,11 @@ type failedBlob struct {
 }
 
 type fileMetadata struct {
-	Hashes []string `json:"hashes"`
-	Mtime  int64    `json:"mtime"`
-	Size   int64    `json:"size"`
+	Hashes     []string `json:"hashes"`
+	Mtime      int64    `json:"mtime"`
+	Size       int64    `json:"size"`
+	Truncated  int      `json:"truncated,omitempty"`  // number of truncated lines
+	SkipReason string   `json:"skip_reason,omitempty"` // reason if file was skipped
 }
 
 type filesIndex map[string]map[string]fileMetadata // project_root -> file_path -> metadata
@@ -390,9 +393,10 @@ func (s *Service) isAllowedExt(path string) bool {
 type fileTask struct {
 	absPath string
 	relPath string
+	info    fs.FileInfo
 }
 
-func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
+func (s *Service) collectBlobsWithHash(root string, prevFiles map[string]fileMetadata) ([]blobWithHash, map[string]fileMetadata, error) {
 	maxLines := s.cfg.MaxLinesPerBlob
 	if maxLines <= 0 {
 		maxLines = 800
@@ -415,7 +419,7 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
-				blobs := s.processFile(root, task.absPath, task.relPath, maxLines)
+				blobs := s.processFileWithInfo(root, task.absPath, task.relPath, maxLines, task.info)
 				if len(blobs) > 0 {
 					results <- blobs
 				}
@@ -423,6 +427,7 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 		}()
 	}
 
+	skippedFiles := make(map[string]fileMetadata)
 	go func() {
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -445,7 +450,20 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 			if !s.isAllowedExt(path) {
 				return nil
 			}
-			tasks <- fileTask{absPath: path, relPath: rel}
+
+			info, statErr := d.Info()
+			if statErr != nil {
+				return nil
+			}
+
+			if meta, ok := prevFiles[rel]; ok {
+				if meta.Mtime == info.ModTime().Unix() && meta.Size == info.Size() {
+					skippedFiles[rel] = meta
+					return nil
+				}
+			}
+
+			tasks <- fileTask{absPath: path, relPath: rel, info: info}
 			return nil
 		})
 		close(tasks)
@@ -461,10 +479,10 @@ func (s *Service) collectBlobsWithHash(root string) ([]blobWithHash, error) {
 		allBlobs = append(allBlobs, blobs...)
 	}
 
-	return allBlobs, nil
+	return allBlobs, skippedFiles, nil
 }
 
-func (s *Service) processFile(projectRoot, absPath, relPath string, maxLines int) []blobWithHash {
+func (s *Service) processFileWithInfo(projectRoot, absPath, relPath string, maxLines int, info fs.FileInfo) []blobWithHash {
 	f, err := os.Open(absPath)
 	if err != nil {
 		s.logger.Warn("read file failed", logging.String("file", relPath), logging.Error(err))
@@ -472,9 +490,12 @@ func (s *Service) processFile(projectRoot, absPath, relPath string, maxLines int
 	}
 	defer f.Close()
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil
+	if info == nil {
+		var statErr error
+		info, statErr = f.Stat()
+		if statErr != nil {
+			return nil
+		}
 	}
 
 	data, err := io.ReadAll(f)
@@ -485,18 +506,22 @@ func (s *Service) processFile(projectRoot, absPath, relPath string, maxLines int
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
-	if maxBytes := s.cfg.MaxLineBytes; maxBytes > 0 {
-		for i, line := range lines {
-			if len(line) > maxBytes {
-				s.opLog.Warnf(OpCollect, s.normalizePath(projectRoot), "skipped %s: line %d too long (%d > %d)", relPath, i+1, len(line), maxBytes)
-				return nil
-			}
+	maxBytes := s.cfg.MaxLineBytes
+	if maxBytes <= 0 {
+		maxBytes = 10 * 1024
+	}
+	truncated := 0
+	for i, line := range lines {
+		if len(line) > maxBytes {
+			lines[i] = line[:maxBytes] + "…"
+			truncated++
 		}
 	}
 
 	if len(lines) <= maxLines {
-		b := blob{Path: relPath, Content: content}
-		return []blobWithHash{{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size()}}
+		processedContent := strings.Join(lines, "\n")
+		b := blob{Path: relPath, Content: processedContent}
+		return []blobWithHash{{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size(), Truncated: truncated}}
 	}
 
 	total := len(lines)
@@ -511,13 +536,13 @@ func (s *Service) processFile(projectRoot, absPath, relPath string, maxLines int
 		chunkContent := strings.Join(lines[start:end], "\n")
 		chunkPath := fmt.Sprintf("%s#chunk%dof%d", relPath, i+1, chunks)
 		b := blob{Path: chunkPath, Content: chunkContent}
-		result = append(result, blobWithHash{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size()})
+		result = append(result, blobWithHash{blob: b, Hash: hashBlob(b), Mtime: info.ModTime().Unix(), Size: info.Size(), Truncated: truncated})
 	}
 	return result
 }
 
 func (s *Service) collectBlobs(root string) ([]blob, error) {
-	blobs, err := s.collectBlobsWithHash(root)
+	blobs, _, err := s.collectBlobsWithHash(root, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1242,21 +1267,6 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 
 	s.opLog.Infof(OpCollect, normRoot, "starting file collection")
 
-	blobs, err := s.collectBlobsWithHash(projectRoot)
-	if err != nil {
-		s.opLog.Errorf(OpCollect, normRoot, "collect failed: %v", err)
-		return nil, err
-	}
-	if len(blobs) == 0 {
-		s.opLog.Warn(OpCollect, normRoot, "no text files found", "")
-		return &IndexResult{Status: "error", Message: "no text files found"}, nil
-	}
-
-	s.opLog.Infof(OpCollect, normRoot, "collected %d blobs from %d files", len(blobs), len(blobs))
-	projects, err := s.loadProjects()
-	if err != nil {
-		return nil, err
-	}
 	filesIdx, err := s.loadFilesIndexCached()
 	if err != nil {
 		return nil, err
@@ -1264,6 +1274,28 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 	prevFiles := filesIdx[normRoot]
 	if prevFiles == nil {
 		prevFiles = map[string]fileMetadata{}
+	}
+
+	blobs, skippedFiles, err := s.collectBlobsWithHash(projectRoot, prevFiles)
+	if err != nil {
+		s.opLog.Errorf(OpCollect, normRoot, "collect failed: %v", err)
+		return nil, err
+	}
+
+	skippedCount := len(skippedFiles)
+	if skippedCount > 0 {
+		s.opLog.Infof(OpCollect, normRoot, "skipped %d unchanged files (cache hit)", skippedCount)
+	}
+
+	if len(blobs) == 0 && skippedCount == 0 {
+		s.opLog.Warn(OpCollect, normRoot, "no text files found", "")
+		return &IndexResult{Status: "error", Message: "no text files found"}, nil
+	}
+
+	s.opLog.Infof(OpCollect, normRoot, "collected %d blobs", len(blobs))
+	projects, err := s.loadProjects()
+	if err != nil {
+		return nil, err
 	}
 	currentFiles := map[string]fileMetadata{}
 	currentHashes := map[string]struct{}{}
@@ -1285,17 +1317,26 @@ func (s *Service) IndexProject(projectRoot string) (*IndexResult, error) {
 			hashes[i] = b.Hash
 		}
 
-		// Use metadata from the first chunk (all chunks have same mtime/size from processFile)
 		var mtime, size int64
+		var truncated int
 		if len(fblobs) > 0 {
 			mtime = fblobs[0].Mtime
 			size = fblobs[0].Size
+			truncated = fblobs[0].Truncated
 		}
 
 		currentFiles[relPath] = fileMetadata{
-			Hashes: hashes,
-			Mtime:  mtime,
-			Size:   size,
+			Hashes:    hashes,
+			Mtime:     mtime,
+			Size:      size,
+			Truncated: truncated,
+		}
+	}
+
+	for relPath, meta := range skippedFiles {
+		currentFiles[relPath] = meta
+		for _, h := range meta.Hashes {
+			currentHashes[h] = struct{}{}
 		}
 	}
 
@@ -1571,16 +1612,18 @@ func (s *Service) collectFileBlobs(projectRoot string, relPath string) ([]blob, 
 		maxLines = 800
 	}
 	lines := strings.Split(content, "\n")
-	if maxBytes := s.cfg.MaxLineBytes; maxBytes > 0 {
-		for i, line := range lines {
-			if len(line) > maxBytes {
-				s.opLog.Warnf(OpCollect, s.normalizePath(projectRoot), "skipped %s: line %d too long (%d > %d)", relPath, i+1, len(line), maxBytes)
-				return nil, nil
-			}
+	maxBytes := s.cfg.MaxLineBytes
+	if maxBytes <= 0 {
+		maxBytes = 10 * 1024
+	}
+	for i, line := range lines {
+		if len(line) > maxBytes {
+			lines[i] = line[:maxBytes] + "…"
 		}
 	}
 	if len(lines) <= maxLines {
-		return []blob{{Path: relPath, Content: content}}, nil
+		processedContent := strings.Join(lines, "\n")
+		return []blob{{Path: relPath, Content: processedContent}}, nil
 	}
 
 	total := len(lines)
