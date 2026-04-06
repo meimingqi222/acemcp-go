@@ -272,14 +272,32 @@ func runMCP(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, 
 		resp := dispatch(req, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout)
 		if transport == transportFramed {
 			if err := writeFramedResponse(stdout, resp); err != nil {
+				logger.Error("write framed response error", logging.Error(err))
+				// Check if it's a broken pipe (client disconnected)
+				if isBrokenPipeError(err) {
+					logger.Info("client disconnected (broken pipe), shutting down gracefully")
+					return
+				}
 				return
 			}
 		} else {
 			if err := enc.Encode(resp); err != nil {
+				logger.Error("encode response error", logging.Error(err))
+				if isBrokenPipeError(err) {
+					logger.Info("client disconnected (broken pipe), shutting down gracefully")
+					return
+				}
 				return
 			}
 		}
-		_ = stdout.Flush()
+		if err := stdout.Flush(); err != nil {
+			logger.Error("flush stdout error", logging.Error(err))
+			if isBrokenPipeError(err) {
+				logger.Info("client disconnected (broken pipe), shutting down gracefully")
+				return
+			}
+			return
+		}
 	}
 }
 
@@ -598,4 +616,17 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !st.IsDir()
+}
+
+// isBrokenPipeError checks if an error is a broken pipe error
+func isBrokenPipeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for specific error strings that indicate broken pipe
+	// This is a best-effort check since Go doesn't export EPIPE directly
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "write: broken pipe") ||
+		strings.Contains(errStr, "EPIPE")
 }
