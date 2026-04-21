@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,6 +87,45 @@ const (
 	transportPlain transportMode = iota
 	transportFramed
 )
+
+type requestDispatcher func(rpcRequest) rpcResponse
+
+type responseWriter struct {
+	mu        sync.Mutex
+	writer    *bufio.Writer
+	enc       *json.Encoder
+	transport transportMode
+}
+
+func newResponseWriter(w io.Writer, transport transportMode) *responseWriter {
+	bw := bufio.NewWriter(w)
+	rw := &responseWriter{
+		writer:    bw,
+		transport: transport,
+	}
+	if transport == transportPlain {
+		rw.enc = json.NewEncoder(bw)
+	}
+	return rw
+}
+
+func (w *responseWriter) Write(resp rpcResponse) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var err error
+	if w.transport == transportFramed {
+		err = writeFramedResponse(w.writer, resp)
+	} else {
+		err = w.enc.Encode(resp)
+	}
+	if err != nil {
+		return err
+	}
+	return w.writer.Flush()
+}
+
+var ensureDaemonMu sync.Mutex
 
 func main() {
 	dataDir := flag.String("data", "", "Data directory (passed to daemon; defaults to ~/.acemcp/data)")
@@ -225,20 +266,34 @@ func runMCP(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stdin := bufio.NewReader(os.Stdin)
+	dispatcher := func(req rpcRequest) rpcResponse {
+		return dispatch(req, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout)
+	}
+	if err := serveMCP(ctx, os.Stdin, os.Stdout, logger, dispatcher); err != nil {
+		if isBrokenPipeError(err) {
+			logger.Info("client disconnected (broken pipe), shutting down gracefully")
+			return
+		}
+		if !errors.Is(err, io.EOF) {
+			logger.Error("mcp server stopped with read error", logging.Error(err))
+		}
+	}
+}
+
+func serveMCP(ctx context.Context, input io.Reader, output io.Writer, logger *logging.Logger, dispatcher requestDispatcher) error {
+	stdin := bufio.NewReader(input)
 	transport := detectTransport(stdin)
+	writer := newResponseWriter(output, transport)
 
 	var dec *json.Decoder
 	if transport == transportPlain {
 		dec = json.NewDecoder(stdin)
 	}
-	stdout := bufio.NewWriter(os.Stdout)
-	enc := json.NewEncoder(stdout)
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 
@@ -250,54 +305,32 @@ func runMCP(daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir string, 
 			err = dec.Decode(&req)
 		}
 		if err != nil {
-			return
+			return err
 		}
 
 		if req.ID == nil && req.Method == "exit" {
-			return
+			return nil
 		}
 
-		// Handle notifications (no ID) - some need special handling
 		if req.ID == nil {
 			switch req.Method {
 			case "initialized":
-				// initialized is a notification, no response needed
-				// just continue to next request
 			default:
-				// Unknown notification, ignore
 			}
 			continue
 		}
 
-		resp := dispatch(req, daemonAddr, daemonHTTP, daemonLogLevel, daemonPath, dataDir, startTimeout)
-		if transport == transportFramed {
-			if err := writeFramedResponse(stdout, resp); err != nil {
-				logger.Error("write framed response error", logging.Error(err))
-				// Check if it's a broken pipe (client disconnected)
+		reqCopy := req
+		go func() {
+			resp := dispatcher(reqCopy)
+			if err := writer.Write(resp); err != nil {
 				if isBrokenPipeError(err) {
 					logger.Info("client disconnected (broken pipe), shutting down gracefully")
 					return
 				}
-				return
+				logger.Error("write response error", logging.Error(err))
 			}
-		} else {
-			if err := enc.Encode(resp); err != nil {
-				logger.Error("encode response error", logging.Error(err))
-				if isBrokenPipeError(err) {
-					logger.Info("client disconnected (broken pipe), shutting down gracefully")
-					return
-				}
-				return
-			}
-		}
-		if err := stdout.Flush(); err != nil {
-			logger.Error("flush stdout error", logging.Error(err))
-			if isBrokenPipeError(err) {
-				logger.Info("client disconnected (broken pipe), shutting down gracefully")
-				return
-			}
-			return
-		}
+		}()
 	}
 }
 
@@ -535,6 +568,9 @@ func mustMarshal(v any) json.RawMessage {
 }
 
 func ensureDaemon(addr, httpAddr, daemonLogLevel, daemonPath, dataDir string, timeout time.Duration) error {
+	ensureDaemonMu.Lock()
+	defer ensureDaemonMu.Unlock()
+
 	if isPortOpen(addr, 150*time.Millisecond) {
 		return nil
 	}
